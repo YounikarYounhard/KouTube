@@ -1,0 +1,82 @@
+# A tag v* = a release: the Android APK (signed with the KouTube key from the repository secrets) and the
+# Windows zip (KouTube.exe + yt-dlp, ffmpeg, ffprobe, deno in tools\). Tests of both run first.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Signing key
+        env:
+          KS: ${{ secrets.KOUTUBE_KEYSTORE_B64 }}
+        run: echo "$KS" | base64 -d > "$RUNNER_TEMP/koutube.jks"
+      - name: Tests and APK
+        working-directory: android
+        env:
+          KOUTUBE_KEYSTORE: ${{ runner.temp }}/koutube.jks
+          KOUTUBE_KEYSTORE_PASSWORD: ${{ secrets.KOUTUBE_KEYSTORE_PASSWORD }}
+          KOUTUBE_KEY_ALIAS: ${{ secrets.KOUTUBE_KEY_ALIAS }}
+          KOUTUBE_KEY_PASSWORD: ${{ secrets.KOUTUBE_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/KouTube-${GITHUB_REF_NAME#v}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: KouTube-*.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Tests
+        run: dotnet run --project windows/KouTube.Tests
+      - name: Program and its tools
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out/KouTube
+          Remove-Item out/KouTube/*.pdb -ErrorAction SilentlyContinue
+          $t = New-Item -ItemType Directory out/KouTube/tools
+          Invoke-WebRequest https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -OutFile "$t/yt-dlp.exe"
+          Invoke-WebRequest https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile ff.zip
+          Expand-Archive ff.zip ff
+          Copy-Item ff/*/bin/ffmpeg.exe, ff/*/bin/ffprobe.exe $t
+          Invoke-WebRequest https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip -OutFile deno.zip
+          Expand-Archive deno.zip $t
+          Compress-Archive out/KouTube "KouTube-$v-windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: KouTube-*-windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" KouTube-* --title "KouTube ${GITHUB_REF_NAME#v}" --notes-file .github/RELEASE_NOTES.md

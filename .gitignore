@@ -14,3 +14,8 @@ screens/
 PLAN.md
 Промт.txt
 spec/collection-report.md
+keystore/
+# crash logs and compiler sessions
+hs_err_pid*.log
+replay_pid*.log
+.kotlin/

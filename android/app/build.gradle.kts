@@ -14,13 +14,28 @@ android {
         minSdk = 24                     // Android 7.0
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.0.1"
+    }
+
+    // GitHub's build signs releases with the KouTube key from the repository secrets; a local release build
+    // falls back to the debug key, so it installs over a debug build for testing
+    signingConfigs {
+        System.getenv("KOUTUBE_KEYSTORE")?.let { ks ->
+            create("release") {
+                storeFile = file(ks)
+                storePassword = System.getenv("KOUTUBE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KOUTUBE_KEY_ALIAS")
+                keyPassword = System.getenv("KOUTUBE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            // no R8 for now: the release is the very build that was tested, only signed (shrinking needs its own testing)
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
