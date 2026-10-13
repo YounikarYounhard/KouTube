@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "name": "big: 40000 bytes, byte[i] = i % 251",
+      "gen": {
+        "size": 40000,
+        "mod": 251
+      },
+      "key": "f1-40000-f08988b706ff8a03"
+    },
+    {
+      "name": "small: 1000 bytes, byte[i] = i % 7",
+      "gen": {
+        "size": 1000,
+        "mod": 7
+      },
+      "key": "f1-1000-d743bb866528ea29"
+    }
+  ]
+}

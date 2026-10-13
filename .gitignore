@@ -1,0 +1,16 @@
+tools/
+*.user
+bin/
+obj/
+.gradle/
+build/
+local.properties
+.idea/
+*.apk
+publish/
+screens/
+
+# personal notes, kept local
+PLAN.md
+Промт.txt
+spec/collection-report.md

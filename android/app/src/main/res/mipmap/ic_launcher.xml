@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 7.x: no adaptive icons — a red rounded rectangle with a white play triangle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FF0000"
+        android:pathData="M30,22 L78,22 Q100,22 100,44 L100,64 Q100,86 78,86 L30,86 Q8,86 8,64 L8,44 Q8,22 30,22 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M45,38 L71,54 L45,70 Z" />
+</vector>

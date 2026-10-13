@@ -1,0 +1,240 @@
+{
+  "cases": [
+    {
+      "name": "разные группы с разных устройств объединяются",
+      "devices": [
+        {
+          "schema": 1,
+          "deviceId": "android-a",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "watch": {
+                "ts": 10,
+                "status": "started",
+                "posMs": 5000
+              }
+            }
+          }
+        },
+        {
+          "schema": 1,
+          "deviceId": "windows-b",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "meta": {
+                "ts": 20,
+                "title": "T",
+                "ytId": "abcdefghijk"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "f1-100-aaaaaaaaaaaaaaaa": {
+          "meta": {
+            "ts": 20,
+            "title": "T",
+            "ytId": "abcdefghijk"
+          },
+          "watch": {
+            "ts": 10,
+            "status": "started",
+            "posMs": 5000
+          }
+        }
+      }
+    },
+    {
+      "name": "в одной группе побеждает больший ts",
+      "devices": [
+        {
+          "schema": 1,
+          "deviceId": "android-a",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "watch": {
+                "ts": 30,
+                "status": "finished",
+                "posMs": 60000
+              }
+            }
+          }
+        },
+        {
+          "schema": 1,
+          "deviceId": "android-z",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "watch": {
+                "ts": 29,
+                "status": "started",
+                "posMs": 1000
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "f1-100-aaaaaaaaaaaaaaaa": {
+          "watch": {
+            "ts": 30,
+            "status": "finished",
+            "posMs": 60000
+          }
+        }
+      }
+    },
+    {
+      "name": "при равном ts побеждает больший deviceId",
+      "devices": [
+        {
+          "schema": 1,
+          "deviceId": "android-z",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "flags": {
+                "ts": 7,
+                "keep": true
+              }
+            }
+          }
+        },
+        {
+          "schema": 1,
+          "deviceId": "android-a",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "flags": {
+                "ts": 7,
+                "keep": false
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "f1-100-aaaaaaaaaaaaaaaa": {
+          "flags": {
+            "ts": 7,
+            "keep": true
+          }
+        }
+      }
+    },
+    {
+      "name": "ПК обновил meta позже — удаление после просмотра с телефона не теряется",
+      "devices": [
+        {
+          "schema": 1,
+          "deviceId": "android-a",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "file": {
+                "ts": 100,
+                "state": "deletedAfterWatch",
+                "at": 100
+              },
+              "flags": {
+                "ts": 100,
+                "noAutoRedownload": true
+              }
+            }
+          }
+        },
+        {
+          "schema": 1,
+          "deviceId": "windows-b",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "meta": {
+                "ts": 200,
+                "title": "T2"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "f1-100-aaaaaaaaaaaaaaaa": {
+          "meta": {
+            "ts": 200,
+            "title": "T2"
+          },
+          "file": {
+            "ts": 100,
+            "state": "deletedAfterWatch",
+            "at": 100
+          },
+          "flags": {
+            "ts": 100,
+            "noAutoRedownload": true
+          }
+        }
+      }
+    },
+    {
+      "name": "записи из разных файлов объединяются по ключу",
+      "devices": [
+        {
+          "schema": 1,
+          "deviceId": "android-a",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-100-aaaaaaaaaaaaaaaa": {
+              "watch": {
+                "ts": 1,
+                "status": "new"
+              }
+            }
+          }
+        },
+        {
+          "schema": 1,
+          "deviceId": "windows-b",
+          "kind": "android",
+          "writtenAt": 1,
+          "items": {
+            "f1-200-bbbbbbbbbbbbbbbb": {
+              "meta": {
+                "ts": 2,
+                "title": "X"
+              }
+            }
+          }
+        }
+      ],
+      "expected": {
+        "f1-100-aaaaaaaaaaaaaaaa": {
+          "watch": {
+            "ts": 1,
+            "status": "new"
+          }
+        },
+        "f1-200-bbbbbbbbbbbbbbbb": {
+          "meta": {
+            "ts": 2,
+            "title": "X"
+          }
+        }
+      }
+    }
+  ]
+}
