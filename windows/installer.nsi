@@ -1,6 +1,7 @@
 ; KouTube for Windows: one per-user install (no admin rights), shortcuts in Start and on the desktop, an entry in
 ; "Apps & features". A newer setup installs over the old one; the tools it downloaded and the library stay.
-; The release workflow builds it:  makensis /DVERSION=x.y.z /DEXE=<path>\KouTube.exe /DOUT=<path>\KouTube-Setup-x.y.z.exe installer.nsi
+; The release workflow builds it on Linux:  makensis -DVERSION=x.y.z -DEXE=<path>/KouTube.exe -DOUT=<path>/KouTube-Setup-x.y.z.exe installer.nsi
+; (on Windows the switches are /DVERSION=… and so on)
 
 Unicode true
 !include "MUI2.nsh"
@@ -14,8 +15,8 @@ InstallDirRegKey HKCU "Software\KouTube" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-!define MUI_ICON "KouTube\koutube.ico"
-!define MUI_UNICON "KouTube\koutube.ico"
+!define MUI_ICON "KouTube/koutube.ico"
+!define MUI_UNICON "KouTube/koutube.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\KouTube.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Запустить KouTube"
 !insertmacro MUI_PAGE_DIRECTORY

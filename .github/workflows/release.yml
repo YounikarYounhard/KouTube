@@ -48,19 +48,12 @@ jobs:
           dotnet-version: "10.0.x"
       - name: Tests
         run: dotnet run --project windows/KouTube.Tests
-      - name: KouTube.exe and its installer
-        shell: pwsh
-        run: |
-          $v = "${{ github.ref_name }}".TrimStart('v')
-          dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out
-          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (!(Test-Path $nsis)) { choco install nsis -y --no-progress }
-          & $nsis "/DVERSION=$v" "/DEXE=$PWD\out\KouTube.exe" "/DOUT=$PWD\KouTube-Setup-$v.exe" windows/installer.nsi
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: KouTube.exe
+        run: dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: KouTube-Setup-*.exe
+          path: out/KouTube.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -71,6 +64,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      # NSIS is not on the Windows runner (and Chocolatey's feed fails now and then); Ubuntu's own package builds the
+      # same Windows installer
+      - name: Installer
+        run: |
+          sudo apt-get install -y -q nsis
+          v="${GITHUB_REF_NAME#v}"
+          makensis -V2 "-DVERSION=$v" "-DEXE=$PWD/KouTube.exe" "-DOUT=$PWD/KouTube-Setup-$v.exe" windows/installer.nsi
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
