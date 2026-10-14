@@ -172,12 +172,21 @@
                 <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" FontSize="15" Opacity="0.6" VerticalAlignment="Center" Margin="14,0,0,0" IsHitTestVisible="False" />
                 <TextBlock x:Name="SearchHint" Text="Поиск" Opacity="0.5" VerticalAlignment="Center" Margin="38,0,0,0" IsHitTestVisible="False" />
             </Grid>
-            <Button Grid.Column="2" Click="OnPick" Padding="20,9" Style="{StaticResource RedButton}" ToolTip="Подобрать новые видео и Shorts под свободное место">
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="&#xE896;" FontFamily="{StaticResource Icons}" FontSize="16" VerticalAlignment="Center" />
-                    <TextBlock Text="Подборка" Margin="8,0,0,0" FontSize="15" FontWeight="SemiBold" />
-                </StackPanel>
-            </Button>
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <!-- stick back from the phone: clear what was watched, then pick new ones -->
+                <Button Click="OnCleanWatched" Padding="16,9" Margin="0,0,8,0" ToolTip="Удалить с флешки и телефона то, что уже досмотрено — перед тем как качать новое">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource Icons}" FontSize="16" VerticalAlignment="Center" />
+                        <TextBlock x:Name="CleanText" Text="Убрать просмотренные" Margin="8,0,0,0" FontSize="15" />
+                    </StackPanel>
+                </Button>
+                <Button Click="OnPick" Padding="20,9" Style="{StaticResource RedButton}" ToolTip="Подобрать новые видео и Shorts под свободное место">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE896;" FontFamily="{StaticResource Icons}" FontSize="16" VerticalAlignment="Center" />
+                        <TextBlock Text="Подборка" Margin="8,0,0,0" FontSize="15" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
         </Grid>
 
         <!-- left menu -->

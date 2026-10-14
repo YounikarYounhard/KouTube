@@ -92,6 +92,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = "KouTube " + Ui.Version;
         QueueList.ItemsSource = Downloader.Rows;
         Downloader.OnChanged += () => Ui.OnUi(UpdatePlan);
         // the summary panel follows the running download twice a second
@@ -132,6 +133,8 @@ public partial class MainWindow : Window
             await Task.Run(() => Lib.Refresh(m, s => Status($"{m.Name}: {s}")));
         }
         Recommend.Calibrate(Lib.Videos());
+        var watched = Lib.Mounts.Where(m => m.Online).Sum(m => Lib.Watched(m).Count);
+        CleanText.Text = watched > 0 ? $"Убрать просмотренные ({watched})" : "Убрать просмотренные";
         RefreshStorageUi();
         ShowLibrary();
         UpdatePlan();
@@ -251,12 +254,18 @@ public partial class MainWindow : Window
 
     readonly HashSet<string> _offered = [];
 
-    /// <summary>Once per session and storage: show what was watched and offer to clear it and pick new videos.</summary>
-    async Task OfferCleanup()
+    async void OnCleanWatched(object sender, RoutedEventArgs e) => await OfferCleanup(asked: true);
+
+    /// <summary>
+    /// Show what was watched and offer to clear it and pick new videos: by itself once per session and storage,
+    /// and any time from «Убрать просмотренные» (<paramref name="asked"/>).
+    /// </summary>
+    async Task OfferCleanup(bool asked = false)
     {
+        if (asked && Lib.Mounts.Where(m => m.Online).All(m => Lib.Watched(m).Count == 0)) { Status("Просмотренных видео на подключённых носителях нет"); return; }
         foreach (var m in Lib.Mounts.Where(m => m.Online).ToList())
         {
-            if (!_offered.Add(m.Ref.StorageId)) continue;
+            if (!_offered.Add(m.Ref.StorageId) && !asked) continue;
             var watched = Lib.Watched(m);
             if (watched.Count == 0) continue;
             var w = new CleanupWindow(m, watched) { Owner = this };

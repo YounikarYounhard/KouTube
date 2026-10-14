@@ -1,5 +1,5 @@
-# A tag v* = a release: the Android APK (signed with the KouTube key from the repository secrets) and one
-# KouTube.exe for Windows (it fetches yt-dlp, ffmpeg and deno itself on first start). Tests of both run first.
+# A tag v* = a release: the Android APK (signed with the KouTube key from the repository secrets) and the
+# Windows installer (KouTube.exe fetches yt-dlp, ffmpeg and deno itself on first start). Tests of both run first.
 name: release
 
 on:
@@ -48,16 +48,19 @@ jobs:
           dotnet-version: "10.0.x"
       - name: Tests
         run: dotnet run --project windows/KouTube.Tests
-      - name: KouTube.exe
+      - name: KouTube.exe and its installer
         shell: pwsh
         run: |
           $v = "${{ github.ref_name }}".TrimStart('v')
           dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out
-          Move-Item out/KouTube.exe "KouTube-$v.exe"
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (!(Test-Path $nsis)) { choco install nsis -y --no-progress }
+          & $nsis "/DVERSION=$v" "/DEXE=$PWD\out\KouTube.exe" "/DOUT=$PWD\KouTube-Setup-$v.exe" windows/installer.nsi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: KouTube-*.exe
+          path: KouTube-Setup-*.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

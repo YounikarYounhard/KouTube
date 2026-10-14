@@ -13,8 +13,8 @@ android {
         applicationId = "com.koutube"
         minSdk = 24                     // Android 7.0
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.0.5"
+        versionCode = 6
+        versionName = "0.0.6"
     }
 
     // GitHub's build signs releases with the KouTube key from the repository secrets; a local release build

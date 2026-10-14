@@ -9,5 +9,5 @@
 ## Сборка
 
 - **Android:** `cd android && gradlew assembleDebug` (JDK 17+, Android SDK).
-- **Windows:** .NET 10 SDK, `dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true`. `yt-dlp.exe`, `ffmpeg.exe`, `ffprobe.exe` и `deno.exe` программа при первом запуске скачает сама — в папку `tools` рядом с собой.
+- **Windows:** .NET 10 SDK, `dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true`. `yt-dlp.exe`, `ffmpeg.exe`, `ffprobe.exe` и `deno.exe` программа при первом запуске скачает сама — в папку `tools` рядом с собой. Установщик собирает NSIS: `makensis /DVERSION=… /DEXE=…\KouTube.exe /DOUT=…\KouTube-Setup.exe windows/installer.nsi`.
 - **Проверки:** `dotnet run --project windows/KouTube.Tests` и `gradlew testDebugUnitTest`.
