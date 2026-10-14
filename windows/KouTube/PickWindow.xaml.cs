@@ -297,7 +297,7 @@ public partial class PickWindow : Window
             Lib.Update(x => x with { LastPickGb = Total.Value });
             _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true).Fill();
             // the list appears whole: every cover is here before it shows, so it scrolls without holes
-            await Preload([.. _sel.Videos, .. _sel.Shorts, .. _sel.Spare], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
+            await Recommend.Covers([.. _sel.Videos, .. _sel.Shorts, .. _sel.Spare], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
             VideoPicks.ItemsSource = _sel.Videos;
             ShortPicks.ItemsSource = _sel.Shorts;
             _sel.Videos.CollectionChanged += (_, _) => Headers();
@@ -309,30 +309,6 @@ public partial class PickWindow : Window
         }
         catch (Exception ex) { PickStatus.Text = "Не удалось подобрать: " + ex.Message; }
         finally { PickProgress.Visibility = Visibility.Collapsed; }
-    }
-
-    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
-
-    static async Task Preload(List<Pick> picks, Action<double> progress)
-    {
-        var todo = picks.Where(p => p.Thumb != null && !Pick.Pics.ContainsKey(p.Thumb)).DistinctBy(p => p.Thumb).ToList();
-        var done = 0;
-        await Parallel.ForEachAsync(todo, new ParallelOptions { MaxDegreeOfParallelism = 12 }, async (p, ct) =>
-        {
-            try
-            {
-                var b = new BitmapImage();
-                b.BeginInit();
-                b.CacheOption = BitmapCacheOption.OnLoad;
-                b.DecodePixelWidth = p.Kind == "short" ? 150 : 250;      // the card's size: hundreds of Shorts stay light
-                b.StreamSource = new MemoryStream(await Http.GetByteArrayAsync(p.Thumb, ct));
-                b.EndInit();
-                b.Freeze();
-                Pick.Pics[p.Thumb!] = b;
-            }
-            catch (Exception) { }       // no cover now: the card tries again itself
-            progress(Interlocked.Increment(ref done) / (double)Math.Max(1, todo.Count));
-        });
     }
 
     void Headers()

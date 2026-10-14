@@ -296,7 +296,8 @@ public partial class MainWindow : Window
             .Select(m => (m, Downloader.Check(m))).ToList();
         PlanText.Text = plans.Count == 0 ? (Downloader.Rows.Count == 0 ? "Очередь пуста. Нажмите «Подборка» или вставьте ссылку." : "В очереди нечего качать.")
             : string.Join("\n", plans.Select(p => $"{p.m.Name}: {p.Item2.Text}"));
-        PlanText.Foreground = plans.Any(p => !p.Item2.Ok) ? Brushes.IndianRed : (Brush)FindResource(SystemColors.ControlTextBrushKey);
+        // the theme's own text colour when all is well (the system "control text" is black even on the dark theme)
+        if (plans.Any(p => !p.Item2.Ok)) PlanText.Foreground = Brushes.IndianRed; else PlanText.ClearValue(TextBlock.ForegroundProperty);
         ConfirmBtn.IsEnabled = !Downloader.Running && plans.Count > 0 && plans.All(p => p.Item2.Ok);
         StopBtn.IsEnabled = Downloader.Running;
         FindBtn.IsEnabled = !Downloader.Running;
@@ -305,9 +306,20 @@ public partial class MainWindow : Window
         UpdateSummary();
     }
 
+    DateTime? _runStart;
+    long _runBytes;
+
     void UpdateSummary()
     {
-        var (done, total, failed, bd, bt, speed, eta) = Downloader.Summary();
+        var (done, total, failed, bd, bt, speed, _) = Downloader.Summary();
+        // time left from the average pace since the start: downloading, cutting and copying all count, so it neither
+        // vanishes while a file is being copied nor jumps with every new video
+        if (!Downloader.Running) _runStart = null;
+        else if (_runStart == null) (_runStart, _runBytes) = (DateTime.Now, bd);
+        var secs = (DateTime.Now - (_runStart ?? DateTime.Now)).TotalSeconds;
+        var pace = secs > 30 && bd > _runBytes ? (bd - _runBytes) / secs : speed;
+        var eta = pace > 0 && bt > bd ? (bt - bd) / pace : 0;
+        RetryBtn.Visibility = failed > 0 && !Downloader.Running ? Visibility.Visible : Visibility.Collapsed;
         SumTitle.Text = total == 0 ? "Очередь пуста" : Downloader.Running ? $"Скачано {done} из {total}" : done == total ? $"Готово: {done} из {total}" : $"В очереди {total - done}";
         SumDetail.Text = total == 0 ? "Нажмите «Подборка» или вставьте ссылку ниже." : string.Join(" · ", new[] {
             $"{Ui.Gb(bd)} из {Ui.Gb(bt)}",
@@ -345,6 +357,13 @@ public partial class MainWindow : Window
         UpdatePlan();
         await run;
         await RefreshAll();
+    }
+
+    async void OnRetry(object sender, RoutedEventArgs e)
+    {
+        foreach (var r in Downloader.Rows.Where(r => r.Item.Include && r.Item.Status == Q.Failed)) { r.Item = r.Item with { Status = Q.Pending }; r.Progress = ""; }
+        Downloader.Changed();
+        await RunQueue();
     }
 
     void OnStop(object sender, RoutedEventArgs e) { Downloader.Stop(); Status("Пауза. Недокачанное продолжится с того же места — нажмите «Скачать»"); }

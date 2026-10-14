@@ -461,13 +461,15 @@ public static class Lib
             .GroupBy(e => e.Value.Meta!.Channel!).ToList();
         foreach (var g in byChannel)
         {
+            // a channel known here only by its Shorts gets a tiny picture; its first real video brings the full one
+            var tiny = g.All(e => e.Value.Meta!.Kind == "short");
             var file = Config.Avatars.GetValueOrDefault(g.Key);
-            if (file == null || !File.Exists(Path.Combine(dir, file)))
+            if (file == null || !File.Exists(Path.Combine(dir, file)) || !tiny && file.EndsWith(".s.jpg"))
             {
                 var ytId = g.Select(e => e.Value.Meta!.YtId).FirstOrDefault(i => i != null);
                 if (ytId == null) continue;
                 progress?.Invoke($"Значок канала «{g.Key}»…");
-                file = await Task.Run(() => DownloadAvatar(ytId, dir));
+                file = await Task.Run(() => DownloadAvatar(ytId, dir, tiny));
                 if (file == null) return;                     // YouTube unreachable: try another day
                 Update(c => c with { Avatars = new(c.Avatars) { [g.Key] = file } });
             }
@@ -524,19 +526,21 @@ public static class Lib
         catch (Exception) { return null; }
     }
 
-    static string? DownloadAvatar(string ytId, string dir)
+    static string? DownloadAvatar(string ytId, string dir, bool tiny = false)
     {
         try
         {
             var v = Tools.Json(Tools.YtDlp, ["-J", "--no-playlist", "--no-warnings", "--skip-download", "https://www.youtube.com/watch?v=" + ytId], 60_000);
             var chId = v.GetProperty("channel_id").GetString()!;
-            var name = chId + ".jpg";
+            var name = chId + (tiny ? ".s.jpg" : ".jpg");
             if (File.Exists(Path.Combine(dir, name))) return name;
             var c = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-items", "0", "--no-warnings", "https://www.youtube.com/channel/" + chId], 60_000);
             var url = c.GetProperty("thumbnails").EnumerateArray()
                 .Where(t => t.TryGetProperty("id", out var id) && id.GetString()?.StartsWith("avatar") == true)
                 .Select(t => t.GetProperty("url").GetString()).FirstOrDefault();
             if (url == null) return null;
+            // YouTube's picture server sizes by the "=s900" in the address: 48 px for a Shorts-only channel is ~2 KB, unnoticeable that small
+            if (tiny) url = Regex.Replace(url, @"=s\d+", "=s48");
             File.WriteAllBytes(Path.Combine(dir, name), Http.GetByteArrayAsync(url).GetAwaiter().GetResult());
             return name;
         }

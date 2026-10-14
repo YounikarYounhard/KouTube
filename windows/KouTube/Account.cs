@@ -144,5 +144,14 @@ public static class Account
         catch (Exception) { return []; }
     }
 
+    /// <summary>For a download YouTube refused as "a bot": a copy of the cookies, so yt-dlp's write-back never races the picking.</summary>
+    public static string[] CookieArgs()
+    {
+        if (!SignedIn) return [];
+        var copy = Path.Combine(Dir, "download-cookies.txt");
+        File.Copy(CookieFile, copy, true);
+        return ["--cookies", copy];
+    }
+
     static string? S(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 }

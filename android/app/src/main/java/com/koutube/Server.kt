@@ -105,6 +105,7 @@ object Server {
         thread(name = "koutube-server") {
             while (!ss.isClosed) {
                 val s = runCatching { ss.accept() }.getOrNull() ?: break
+                runCatching { s.sendBufferSize = 1 shl 20 }      // a big send window keeps Wi-Fi busy while the stick is read
                 thread(name = "koutube-conn") { runCatching { handle(s) }; runCatching { s.close() } }
             }
         }
@@ -266,7 +267,7 @@ object Server {
             App.instance.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
                 FileInputStream(pfd.fileDescriptor).channel.use { ch ->
                     ch.position(start)
-                    val buf = ByteBuffer.allocate(64 * 1024)
+                    val buf = ByteBuffer.allocate(256 * 1024)      // a USB stick over OTG reads fastest in big pieces
                     var left = len
                     while (left > 0) {
                         buf.clear(); if (left < buf.capacity()) buf.limit(left.toInt())

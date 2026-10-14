@@ -185,9 +185,9 @@ public static class Downloader
     }
 
     /// <summary>Full info for one video: formats with sizes, our pick, the alternatives and the SponsorBlock cut.</summary>
-    public static async Task<QueueItem> Probe(string url, string kind, string? source, string? reason, string storageId)
+    public static async Task<QueueItem> Probe(string url, string kind, string? source, string? reason, string storageId, bool account = false)
     {
-        var j = await Task.Run(() => Tools.Json(Tools.YtDlp, ["-J", "--no-playlist", "--no-warnings", url], 180_000));
+        var j = await Task.Run(() => Tools.Json(Tools.YtDlp, [.. account ? Account.CookieArgs() : [], "-J", "--no-playlist", "--no-warnings", url], 180_000));
         string? S(string n) => j.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         var id = S("id")!;
         var sec = j.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0;
@@ -279,33 +279,51 @@ public static class Downloader
     {
         if (_cts != null) return;
         _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+        // null = done, or not worth another try; otherwise yt-dlp's raw error
+        async Task<string?> Go(QRow row, bool account)
+        {
+            var m = Lib.Mounts.FirstOrDefault(x => x.Ref.StorageId == row.Item.StorageId);
+            if (m == null || !m.Online) { Set(row, Q.Failed, "носитель не подключён"); return null; }
+            try
+            {
+                if (row.Item.Spec == null)
+                {
+                    Set(row, Q.Working, "выбираю формат…");
+                    var it = row.Item;
+                    var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!, account);
+                    Ui.OnUi(() => row.Item = q with { Include = true, Status = q.Status == Q.Failed ? Q.Failed : Q.Pending });
+                    if (q.Status == Q.Failed) return null;
+                }
+                if (!Check(m).Ok) { Set(row, Q.Failed, "нет места — резерв нарушился бы"); return null; }
+                Set(row, Q.Done, await One(row, m, token, account) ?? "");
+                return null;
+            }
+            catch (OperationCanceledException) { Set(row, Q.Pending, "остановлено — продолжится с того же места"); return null; }
+            catch (Exception e) { Set(row, Q.Failed, Human(e.Message)); return e.Message; }
+        }
         try
         {
+            var again = new List<(QRow Row, string Error)>();
             foreach (var row in Rows.ToList())
             {
-                if (_cts.IsCancellationRequested) break;
+                if (token.IsCancellationRequested) break;
                 if (!row.Item.Include || row.Item.Status != Q.Pending) continue;
-                var m = Lib.Mounts.FirstOrDefault(x => x.Ref.StorageId == row.Item.StorageId);
-                if (m == null || !m.Online) { Set(row, Q.Failed, "носитель не подключён"); continue; }
-                if (row.Item.Spec == null)
-                    try
-                    {
-                        Set(row, Q.Working, "выбираю формат…");
-                        var it = row.Item;
-                        var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!);
-                        Ui.OnUi(() => row.Item = q with { Include = true, Status = q.Status == Q.Failed ? Q.Failed : Q.Pending });
-                        if (q.Status == Q.Failed) continue;
-                    }
-                    catch (Exception e) { Set(row, Q.Failed, Human(e.Message)); continue; }
-                if (!Check(m).Ok) { Set(row, Q.Failed, "нет места — резерв нарушился бы"); continue; }
-                try
-                {
-                    var note = await One(row, m, _cts.Token);
-                    Set(row, Q.Done, note ?? "");
-                }
-                catch (OperationCanceledException) { Set(row, Q.Pending, "остановлено — продолжится с того же места"); }
-                catch (Exception e) { Set(row, Q.Failed, Human(e.Message)); }
+                if (await Go(row, false) is { } err && Passing(err)) again.Add((row, err));
                 status($"Готово {Rows.Count(r => r.Item.Status == Q.Done)} из {Rows.Count(r => r.Item.Include)}");
+            }
+            // YouTube's 403 and "are you a bot" usually pass minutes later: one more go at the end — after a 403 with a
+            // fresh yt-dlp, after "not a bot" with your YouTube sign-in if there is one
+            if (again.Count > 0 && !token.IsCancellationRequested)
+            {
+                if (again.Any(x => x.Error.Contains("403"))) { status("Обновляю yt-dlp перед второй попыткой…"); await Task.Run(Tools.UpdateYtDlp); }
+                foreach (var (row, err) in again)
+                {
+                    if (token.IsCancellationRequested) break;
+                    Set(row, Q.Pending, "вторая попытка…");
+                    if (await Go(row, Bot(err) && Account.SignedIn) != null)
+                        Ui.OnUi(() => row.Progress += " Вторая попытка тоже не удалась — нажмите «Повторить ошибки» позже.");
+                }
             }
         }
         finally { _cts = null; _proc = null; Changed(); }
@@ -313,7 +331,7 @@ public static class Downloader
 
     static void Set(QRow r, string status, string progress) => Ui.OnUi(() => { r.Item = r.Item with { Status = status }; r.Progress = progress; Changed(); });
 
-    static async Task<string?> One(QRow row, Mount m, CancellationToken ct)
+    static async Task<string?> One(QRow row, Mount m, CancellationToken ct, bool account = false)
     {
         var it = row.Item;
         var tmp = Directory.CreateDirectory(Path.Combine(Lib.TempDir, it.Id)).FullName;
@@ -334,6 +352,7 @@ public static class Downloader
         args.AddRange(Lib.CommentArgs());
         if (c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
         if (c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
+        if (account) args.AddRange(Account.CookieArgs());
         args.Add(it.Url);
 
         Set(row, Q.Working, "запуск…");
@@ -484,15 +503,20 @@ public static class Downloader
         try { lock (o) lock (e) File.WriteAllLines(LogPath(id), o.Concat(["--- stderr ---"]).Concat(e)); } catch (IOException) { }
     }
 
+    static bool Bot(string err) => err.Contains("not a bot", StringComparison.OrdinalIgnoreCase) || err.Contains("sign in to confirm", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Refusals that tend to pass: worth one more go at the end of the queue.</summary>
+    static bool Passing(string err) => Bot(err) || new[] { "403", "429", "timed out", "connection", "unable to download webpage" }.Any(x => err.Contains(x, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>yt-dlp's English errors in words a person can act on.</summary>
     public static string Human(string raw)
     {
         var s = raw.ToLowerInvariant();
-        if (s.Contains("sign in to confirm") || s.Contains("not a bot")) return "YouTube просит подтвердить, что вы не робот. Включите VPN или попробуйте позже.";
+        if (Bot(s)) return "YouTube попросил подтвердить, что вы не робот (так бывает с адресами VPN) — повторю в конце очереди.";
         if (s.Contains("video unavailable") || s.Contains("private video") || s.Contains("been removed") || s.Contains("terminated"))
             return "Видео недоступно: удалено, скрыто или закрыто автором.";
         if (s.Contains("age") && (s.Contains("restrict") || s.Contains("confirm your age"))) return "Видео 18+: YouTube не отдаёт его без входа в аккаунт.";
-        if (s.Contains("http error 403")) return "YouTube не отдал файл (403). Обновите yt-dlp в «Настройках» и попробуйте снова.";
+        if (s.Contains("http error 403")) return "YouTube не отдал файл (403) — повторю в конце очереди со свежим yt-dlp.";
         if (s.Contains("http error 429")) return "YouTube временно ограничил загрузки (429). Попробуйте позже.";
         if (s.Contains("requested format is not available")) return "Такого формата у видео нет — выберите другой в списке.";
         if (s.Contains("unable to download webpage") || s.Contains("timed out") || s.Contains("getaddrinfo") || s.Contains("connection") || s.Contains("network"))

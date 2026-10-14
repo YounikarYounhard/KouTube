@@ -166,6 +166,17 @@ var fx = Path.Combine(dir?.FullName ?? throw new Exception("spec/fixtures not fo
 int failed = 0, passed = 0;
 void Check(bool ok, string what) { if (ok) passed++; else { failed++; Console.WriteLine("FAIL: " + what); } }
 
+// ---------- picking from YouTube (network): a keyword with "only new" finds plenty ----------
+if (args.Contains("--online") || args.Contains("--picks"))
+{
+    var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, [], (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
+    Console.WriteLine($"  «путешествие», только новые: {kp.Count(p => p.Kind == "video")} видео, {kp.Count(p => p.Kind == "short")} Shorts");
+    Check(kp.Count(p => p.Kind == "video") >= 30 && kp.Count(p => p.Kind == "short") >= 20, "a keyword with «only new» finds plenty of videos and #hashtag Shorts");
+    var some = kp.Take(6).ToList();
+    Recommend.Covers(some, _ => { }).Wait();
+    Check(some.Count(p => p.Img is System.Windows.Media.ImageSource) >= 5, $"covers load ahead: {some.Count(p => p.Img is System.Windows.Media.ImageSource)} of {some.Count}");
+}
+
 // picking without a library: variety, stream cuts, writing systems, «fill completely» (runs everywhere, CI too)
 {
     // variety: one channel does not take the whole list, and one stream cut by several channels comes once
@@ -183,6 +194,9 @@ void Check(bool ok, string what) { if (ok) passed++; else { failed++; Console.Wr
         Recommend.Learn([]), []);
     Check(noPhonk.Count == 1 && noPhonk[0].Id == "p3aaaaaaaaa", "an excluded word keeps a video out, by title or channel: " + string.Join(",", noPhonk.Select(p => p.Id)));
     Lib.Update(c => c with { Exclude = [] });
+    Check(Recommend.IsMusic("Heart boom - KPHK (Super Slowed)", "Stxrlight") && Recommend.IsMusic("𝙃𝙚𝙖𝙧𝙩 𝙗𝙤𝙤𝙢", "X") && Recommend.IsMusic("Honeypie - JAWNY | Ashswag Edit", "ItzSkirk")
+        && Recommend.IsMusic("Night drive", "Phonkero 🎼") && Recommend.IsMusic("Song", "Artist - Topic"), "music videos are recognised");
+    Check(!Recommend.IsMusic("T2x2 ИГРАЕТ в ПРИВЕТ СОСЕД 2", "Берлога T2x2") && !Recommend.IsMusic("Как я напоролся на ПОДСТАВУ при ремонте", "notebook-31"), "ordinary videos are not music");
     Check(Recommend.Script("कुछ नया देखो") == 'o' && Recommend.Script("Привет, мир") == 'c' && Recommend.Script("🔥🔥") == ' ', "titles' writing systems");
 
     // «Заполнить полностью»: a video just over its share borrows from the Shorts; what no video fits gets more Shorts
@@ -393,14 +407,6 @@ if (src.All(File.Exists))
         Check(sel.Videos.Count == 2 && sel.Videos[0].Id == "eeeeeeeeeee" && sel.Videos[1].Id == ranked[0].Id,
             "a linked video comes first and the best of the rest fills the space left: " + string.Join(" | ", sel.Videos.Select(v => v.Id)));
 
-    }
-
-    // ---------- picking from YouTube (network): a keyword with "only new" finds plenty ----------
-    if (args.Contains("--online") || args.Contains("--picks"))
-    {
-        var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, [], (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
-        Console.WriteLine($"  «путешествие», только новые: {kp.Count(p => p.Kind == "video")} видео, {kp.Count(p => p.Kind == "short")} Shorts");
-        Check(kp.Count(p => p.Kind == "video") >= 30 && kp.Count(p => p.Kind == "short") >= 20, "a keyword with «only new» finds plenty of videos and #hashtag Shorts");
     }
 
     // ---------- a real download (network) ----------

@@ -360,7 +360,8 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
     var filter by rememberSaveable { mutableStateOf("home") }
     val s by Lib.settings.collectAsState()
     val storages by Lib.storages.collectAsState()
-    val videos = all.filter { it.present && !it.isShort }
+    // watched to the end: out of the feed, it lives on in «История»
+    val videos = all.filter { it.present && !it.isShort && !it.finished }
     val cont = videos.filter { it.started }.sortedByDescending { it.watch.lastWatchedAt ?: 0 }
     // every video is somewhere in the feed, watched ones at the bottom. A "continue" shelf only pays off in a big
     // library; in a small one it would just repeat the cards below, so started videos simply lead the feed
@@ -405,6 +406,7 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
             }
             if (list.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(when {
+                    videos.isEmpty() && all.any { it.present && !it.isShort } -> "Всё досмотрено — оно в «Истории»."
                     videos.isEmpty() -> "Видео пока нет. Проверьте папки в настройках."
                     filter == "new" -> "Всё уже начато или просмотрено."
                     else -> "Здесь пусто."

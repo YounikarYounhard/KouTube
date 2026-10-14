@@ -126,6 +126,7 @@ public static class Recommend
         var hn = Math.Max(1, (yt ?? []).Count);
         foreach (var (h, i) in (yt ?? []).Select((h, i) => (h, i)))
         {
+            if (IsMusic(h.Title, h.Channel)) continue;       // music you play says nothing about the videos you want
             // watched to the end on YouTube = liked; dropped in the first quarter = not really. The history is newest
             // first, and the newest weigh most: a channel you took to this month outranks one from spring
             var sig = h.Percent switch { >= 90 => 1.0, < 25 => -0.3, _ => 0.4 } * (1 - 0.6 * i / hn);
@@ -175,7 +176,7 @@ public static class Recommend
         if (c.Sources.Count + c.Keywords.Count > 0) return (c, c.Sources);
         string? Id(string name) => c.Avatars.TryGetValue(name, out var a) ? Path.GetFileNameWithoutExtension(a) : it.ChannelIds.GetValueOrDefault(name);
         var exclude = c.Exclude.Select(Plain).Where(w => w.Length > 0).ToList();     // a phonk channel takes no seat if "phonk" is excluded
-        var liked = it.Channels.Where(x => x.Value > 0 && Id(x.Key) != null && !exclude.Any(Plain(x.Key).Contains)).OrderByDescending(x => x.Value)
+        var liked = it.Channels.Where(x => x.Value > 0 && Id(x.Key) != null && !exclude.Any(Plain(x.Key).Contains) && !IsMusic("", x.Key)).OrderByDescending(x => x.Value)
             .Select(x => new Source("https://www.youtube.com/channel/" + Id(x.Key), x.Key, "channel")).ToList();
         return account ? (c with { Sources = liked.Take(12).ToList(), Keywords = [] }, liked.Take(150).ToList())
                        : (c with { Sources = liked.Take(6).ToList(), Keywords = it.Topics.Take(3).ToList() }, liked.Take(6).ToList());
@@ -274,6 +275,32 @@ public static class Recommend
         return bag.GroupBy(p => p.Id).Select(g => g.MaxBy(p => p.Score)! with { Score = g.Max(p => p.Score) + 0.3 * (g.Count() - 1) }).ToList();
     }
 
+    static readonly System.Net.Http.HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+    /// <summary>Covers fetched ahead, a dozen at a time, decoded at the card's size — so the picks show up whole and scroll smoothly.</summary>
+    public static async Task Covers(List<Pick> picks, Action<double> progress)
+    {
+        var todo = picks.Where(p => p.Thumb != null && !Pick.Pics.ContainsKey(p.Thumb)).DistinctBy(p => p.Thumb).ToList();
+        var done = 0;
+        await Parallel.ForEachAsync(todo, new ParallelOptions { MaxDegreeOfParallelism = 12 }, async (p, ct) =>
+        {
+            try
+            {
+                var bytes = await Http.GetByteArrayAsync(p.Thumb, ct);       // first the bytes: the picture must be built on one thread
+                var b = new System.Windows.Media.Imaging.BitmapImage();
+                b.BeginInit();
+                b.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                b.DecodePixelWidth = p.Kind == "short" ? 150 : 250;      // the card's size: hundreds of Shorts stay light
+                b.StreamSource = new MemoryStream(bytes);
+                b.EndInit();
+                b.Freeze();
+                Pick.Pics[p.Thumb!] = b;
+            }
+            catch (Exception) { }       // no cover now: the card tries again itself
+            progress(Interlocked.Increment(ref done) / (double)Math.Max(1, todo.Count));
+        });
+    }
+
     /// <summary>Shorts need their own vertical picture; for videos YouTube's 16:9 one by ID.</summary>
     static string ThumbOf(JsonElement e, string id, bool shorts) =>
         shorts && e.TryGetProperty("thumbnails", out var ts) && ts.ValueKind == JsonValueKind.Array && ts.GetArrayLength() > 0
@@ -293,7 +320,7 @@ public static class Recommend
     public static List<Pick> Rank(List<Pick> cands, Interests it, HashSet<string> skip)
     {
         var exclude = Lib.Config.Exclude.Select(Plain).Where(w => w.Length > 0).ToList();
-        return cands.Where(p => !skip.Contains(p.Id) && (exclude.Count == 0 || !exclude.Any(Plain(p.Title + " " + p.Channel).Contains)) && (p.Channel == null || !it.Blocked.Contains(p.Channel)) && (it.Scripts.Count == 0 || Script(p.Title) is var s && (s == ' ' || it.Scripts.Contains(s)))).Select(p =>
+        return cands.Where(p => !skip.Contains(p.Id) && !IsMusic(p.Title, p.Channel) && (exclude.Count == 0 || !exclude.Any(Plain(p.Title + " " + p.Channel).Contains)) && (p.Channel == null || !it.Blocked.Contains(p.Channel)) && (it.Scripts.Count == 0 || Script(p.Title) is var s && (s == ' ' || it.Scripts.Contains(s)))).Select(p =>
         {
             var why = new List<string>();
             double score = p.Score;                 // «Смотреть позже» and YouTube's own picks start ahead
@@ -346,6 +373,25 @@ public static class Recommend
     }
 
     /// <summary>Lower case with fancy letters made plain: 𝙋𝙃𝙊𝙉𝙆 and ＰＨＯＮＫ are "phonk" too.</summary>
+    static readonly HashSet<string> MusicWords = ["phonk", "фонк", "slowed", "reverb", "remix", "ремикс", "nightcore", "mashup", "мэшап", "lofi", "funk",
+        "jumpstyle", "hardstyle", "amv", "edit", "edits", "эдит", "lyrics", "speedup", "spedup", "клип"];
+    static readonly string[] MusicPhrases = ["sped up", "speed up", "type beat", "official audio", "official music video", "music video", "bass boosted",
+        "8d audio", "full album", "(audio", "audio)", "текст песни"];
+
+    /// <summary>
+    /// Music made into a video — phonk, slowed + reverb, anime edits, a still picture with a track — is never picked: it is a
+    /// few MB of sound worth getting elsewhere, and it floods every list. Told by its words, by 𝙛𝙖𝙣𝙘𝙮 letters (the edit
+    /// scene's typeface) and music notes, and by music channels ("… - Topic", "… Music", "… Records").
+    /// </summary>
+    public static bool IsMusic(string title, string? channel)
+    {
+        var raw = title + " " + channel;
+        if (raw.Contains('\uD835') || raw.Contains("🎼") || raw.Contains("🎵") || raw.Contains("🎶") || raw.Contains("🎧")) return true;
+        if (channel != null && (channel.EndsWith(" - Topic") || Regex.IsMatch(channel, @"\b(music|records|vevo|phonk|edits?)\b", RegexOptions.IgnoreCase))) return true;
+        var t = Plain(title);
+        return MusicPhrases.Any(t.Contains) || Regex.Split(t, @"[^\p{L}\p{Nd}]+").Any(MusicWords.Contains);
+    }
+
     static string Plain(string s) => s.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant();
 
     static double Jaccard(HashSet<string> a, HashSet<string> b) { var i = a.Count(b.Contains); return i / (double)(a.Count + b.Count - i); }
