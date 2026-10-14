@@ -457,6 +457,7 @@ public static class Lib
     {
         if (!m.Online) return;
         var dir = Directory.CreateDirectory(Path.Combine(m.Ml, "avatars")).FullName;
+        await Task.Run(() => ShrinkAvatars(dir));
         var byChannel = m.Merged.Where(e => e.Value.Meta is { Channel: not null, Avatar: null } && m.Docs.ContainsKey(e.Key))
             .GroupBy(e => e.Value.Meta!.Channel!).ToList();
         foreach (var g in byChannel)
@@ -526,6 +527,19 @@ public static class Lib
         catch (Exception) { return null; }
     }
 
+    /// <summary>Pictures saved before 0.0.5 came full size (~550 KB, 983 px): 240 px looks the same on a card. Once, offline, file by file.</summary>
+    public static void ShrinkAvatars(string dir)
+    {
+        foreach (var f in new DirectoryInfo(dir).EnumerateFiles("*.jpg").Where(f => f.Length > 100_000 && !f.Name.EndsWith(".tmp.jpg")))
+        {
+            var tmp = f.FullName[..^4] + ".tmp.jpg";
+            Tools.Run(Tools.FfMpeg, ["-v", "error", "-y", "-i", f.FullName, "-vf", "scale=240:-2", "-q:v", "3", tmp], 60_000);
+            // swapped only when the small copy is really there: a pulled stick or a broken file leaves the old picture
+            if (File.Exists(tmp) && new FileInfo(tmp).Length is > 0 and < 100_000) File.Move(tmp, f.FullName, true);
+            else try { File.Delete(tmp); } catch (IOException) { }
+        }
+    }
+
     static string? DownloadAvatar(string ytId, string dir, bool tiny = false)
     {
         try
@@ -539,8 +553,9 @@ public static class Lib
                 .Where(t => t.TryGetProperty("id", out var id) && id.GetString()?.StartsWith("avatar") == true)
                 .Select(t => t.GetProperty("url").GetString()).FirstOrDefault();
             if (url == null) return null;
-            // YouTube's picture server sizes by the "=s900" in the address: 48 px for a Shorts-only channel is ~2 KB, unnoticeable that small
-            if (tiny) url = Regex.Replace(url, @"=s\d+", "=s48");
+            // YouTube's picture server sizes by the "=s900" in the address: 240 px (~20 KB) looks the same as the 983 px original on a card;
+            // 48 px for a Shorts-only channel is ~3 KB, unnoticeable that small
+            url = Regex.Replace(url, @"=s\d+", tiny ? "=s48" : "=s240");
             File.WriteAllBytes(Path.Combine(dir, name), Http.GetByteArrayAsync(url).GetAwaiter().GetResult());
             return name;
         }

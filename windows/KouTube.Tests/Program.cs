@@ -172,6 +172,14 @@ if (args.Contains("--online") || args.Contains("--picks"))
     var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, [], (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
     Console.WriteLine($"  «путешествие», только новые: {kp.Count(p => p.Kind == "video")} видео, {kp.Count(p => p.Kind == "short")} Shorts");
     Check(kp.Count(p => p.Kind == "video") >= 30 && kp.Count(p => p.Kind == "short") >= 20, "a keyword with «only new» finds plenty of videos and #hashtag Shorts");
+    // channel pictures from before: 983 px, ~550 KB → 240 px on the spot
+    var av = Directory.CreateDirectory(Path.Combine(home, "avatars")).FullName;
+    File.WriteAllBytes(Path.Combine(av, "UCR1HSvPGgweMlKoHRkSkwjw.jpg"), new System.Net.Http.HttpClient().GetByteArrayAsync(
+        "https://yt3.googleusercontent.com/uu7V7CYCK0Ukq80bgd-TxDW_qILTTz2Rc-qm37Dth0uSQvrIKK-R6bXNYFOEFqTEbksYGVXG42I=s0").Result);
+    var before = new FileInfo(Path.Combine(av, "UCR1HSvPGgweMlKoHRkSkwjw.jpg")).Length;
+    Lib.ShrinkAvatars(av);
+    var after = new FileInfo(Path.Combine(av, "UCR1HSvPGgweMlKoHRkSkwjw.jpg")).Length;
+    Check(before > 100_000 && after is > 0 and < 100_000 && Directory.GetFiles(av).Length == 1, $"an old full-size channel picture shrinks: {before / 1024} KB → {after / 1024} KB");
     var some = kp.Take(6).ToList();
     Recommend.Covers(some, _ => { }).Wait();
     Check(some.Count(p => p.Img is System.Windows.Media.ImageSource) >= 5, $"covers load ahead: {some.Count(p => p.Img is System.Windows.Media.ImageSource)} of {some.Count}");
@@ -197,6 +205,7 @@ if (args.Contains("--online") || args.Contains("--picks"))
     Check(Recommend.IsMusic("Heart boom - KPHK (Super Slowed)", "Stxrlight") && Recommend.IsMusic("𝙃𝙚𝙖𝙧𝙩 𝙗𝙤𝙤𝙢", "X") && Recommend.IsMusic("Honeypie - JAWNY | Ashswag Edit", "ItzSkirk")
         && Recommend.IsMusic("Night drive", "Phonkero 🎼") && Recommend.IsMusic("Song", "Artist - Topic"), "music videos are recognised");
     Check(!Recommend.IsMusic("T2x2 ИГРАЕТ в ПРИВЕТ СОСЕД 2", "Берлога T2x2") && !Recommend.IsMusic("Как я напоролся на ПОДСТАВУ при ремонте", "notebook-31"), "ordinary videos are not music");
+    Check(Recommend.Words("Купил ТЕБЯ после 2026 который Майнкрафт").SequenceEqual(["купил", "майнкрафт"]), "filler words and years are no topics");
     Check(Recommend.Script("कुछ नया देखो") == 'o' && Recommend.Script("Привет, мир") == 'c' && Recommend.Script("🔥🔥") == ' ', "titles' writing systems");
 
     // «Заполнить полностью»: a video just over its share borrows from the Shorts; what no video fits gets more Shorts

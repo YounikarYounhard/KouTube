@@ -84,11 +84,18 @@ public static class Recommend
         public IEnumerable<string> Topics => Words.Where(x => x.Value > 0 && WordVideos.GetValueOrDefault(x.Key) >= 2).OrderByDescending(x => x.Value).Select(x => x.Key);
     }
 
-    static readonly HashSet<string> Stop = ["это", "этот", "эта", "этого", "как", "что", "чем", "для", "или", "когда", "если", "весь", "всех", "всё", "все",
-        "самый", "самая", "самое", "the", "and", "with", "from", "this", "that", "your", "what", "часть", "выпуск", "серия", "сезон"];
+    // words of four letters and more that say nothing about a topic ("тебя", "после", "который") — titles are full of them
+    static readonly HashSet<string> Stop = ["это", "этот", "эта", "этого", "этой", "этом", "этих", "этим", "эти", "как", "что", "чем", "для", "или", "когда", "если",
+        "весь", "всех", "всё", "все", "всего", "всем", "вообще", "самый", "самая", "самое", "самые", "тебя", "меня", "себя", "тебе", "мной", "него", "нему",
+        "после", "перед", "через", "между", "против", "около", "который", "которая", "которое", "которые", "которых", "новый", "новая", "новое", "новые",
+        "снова", "опять", "очень", "можно", "нужно", "надо", "будет", "будут", "было", "были", "была", "есть", "тоже", "даже", "потом", "только", "просто",
+        "теперь", "сейчас", "здесь", "там", "почему", "зачем", "сколько", "какой", "какая", "какие", "минут", "минуты", "минута", "часов", "часа", "день",
+        "дней", "года", "году", "лет", "раз", "первый", "лучший", "лучшие", "много", "один", "одна", "одно", "одного", "двух", "часть", "выпуск", "серия",
+        "сезон", "полное", "полный", "видео", "ролик", "смотреть", "the", "and", "with", "from", "this", "that", "your", "what", "when", "have", "will", "best",
+        "first", "video", "part", "episode", "full", "shorts", "short", "official", "about", "into", "just", "like", "more", "most", "than", "they", "their"];
 
     public static IEnumerable<string> Words(string title) =>
-        Regex.Split(Format.UnFullwidth(title).ToLowerInvariant(), @"[^\p{L}\p{Nd}]+").Where(w => w.Length >= 4 && !Stop.Contains(w));
+        Regex.Split(Format.UnFullwidth(title).ToLowerInvariant(), @"[^\p{L}\p{Nd}]+").Where(w => w.Length >= 4 && !Stop.Contains(w) && !w.All(char.IsDigit));   // "2026" is no topic
 
     public static double Signal(Video v)
     {
@@ -206,6 +213,8 @@ public static class Recommend
             var say = prior - decay * i++ / n;      // the home page's top is YouTube's surest guess
             // null: an entry lost with a failed page; channels and playlists among search results have longer ids
             if (e.ValueKind != JsonValueKind.Object || Str(e, "id") is not { Length: 11 } id) continue;
+            // a premiere or a stream not over yet, or a members-only video: nothing to download, only a failure in the queue
+            if (Str(e, "live_status") is "is_upcoming" or "is_live" || Str(e, "availability") is "subscriber_only" or "premium_only" or "needs_auth") continue;
             DateTimeOffset? pub = Long(e, "timestamp") is { } ts ? DateTimeOffset.FromUnixTimeSeconds(ts) : null;
             if (!fresh(pub)) continue;
             var isShort = shortsTab || (Str(e, "url") ?? "").Contains("/shorts/");
@@ -342,8 +351,10 @@ public static class Recommend
             if (good.Count > 0) why.Add("темы: " + string.Join(", ", good));
             if (p.DurationSec is { } d && p.Kind == "video")
             {
+                // the length you usually finish scores best, and every doubling away from it costs more: a three-hour stream
+                // takes the room of ten ordinary videos, so it has to be really wanted to get in
                 var ratio = d / 60 / Math.Max(1, it.MedianMinutes);
-                score += ratio is > 0.4 and < 2.5 ? 0.5 : -0.5;
+                score += Math.Clamp(0.5 - 0.6 * Math.Abs(Math.Log2(Math.Max(ratio, 0.01))), -2, 0.5);
             }
             score += (p.Kind == "short" ? 1 : -1) * Math.Clamp(it.ShortsBias, -1, 1) * 0.5;
             if (p.Published is { } pub) score += Math.Max(0, 1 - (DateTimeOffset.UtcNow - pub).TotalDays / 60) * 0.5;   // a little nudge for fresh
