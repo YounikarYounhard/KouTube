@@ -96,6 +96,8 @@ public record Config
     public double? LastPickGb { get; init; }
     /// <summary>«Заполнить место полностью»: videos and Shorts lend each other room so nothing is left empty.</summary>
     public bool FillAll { get; init; } = true;
+    /// <summary>Take videos from «Смотреть позже» too. Off: many keep there what they watched long ago.</summary>
+    public bool UseWatchLater { get; init; }
 }
 
 public record Wanted(string Id, string Url, string Title, string? Channel, double? DurationSec, string Kind);
@@ -465,7 +467,8 @@ public static class Lib
             // a channel known here only by its Shorts gets a tiny picture; its first real video brings the full one
             var tiny = g.All(e => e.Value.Meta!.Kind == "short");
             var file = Config.Avatars.GetValueOrDefault(g.Key);
-            if (file == null || !File.Exists(Path.Combine(dir, file)) || !tiny && file.EndsWith(".s.jpg"))
+            // an empty file (a download cut off) counts as none
+            if (file == null || !File.Exists(Path.Combine(dir, file)) || new FileInfo(Path.Combine(dir, file)).Length == 0 || !tiny && file.EndsWith(".s.jpg"))
             {
                 var ytId = g.Select(e => e.Value.Meta!.YtId).FirstOrDefault(i => i != null);
                 if (ytId == null) continue;
@@ -547,7 +550,7 @@ public static class Lib
             var v = Tools.Json(Tools.YtDlp, ["-J", "--no-playlist", "--no-warnings", "--skip-download", "https://www.youtube.com/watch?v=" + ytId], 60_000);
             var chId = v.GetProperty("channel_id").GetString()!;
             var name = chId + (tiny ? ".s.jpg" : ".jpg");
-            if (File.Exists(Path.Combine(dir, name))) return name;
+            if (File.Exists(Path.Combine(dir, name)) && new FileInfo(Path.Combine(dir, name)).Length > 0) return name;
             var c = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-items", "0", "--no-warnings", "https://www.youtube.com/channel/" + chId], 60_000);
             var url = c.GetProperty("thumbnails").EnumerateArray()
                 .Where(t => t.TryGetProperty("id", out var id) && id.GetString()?.StartsWith("avatar") == true)
@@ -556,7 +559,9 @@ public static class Lib
             // YouTube's picture server sizes by the "=s900" in the address: 240 px (~20 KB) looks the same as the 983 px original on a card;
             // 48 px for a Shorts-only channel is ~3 KB, unnoticeable that small
             url = Regex.Replace(url, @"=s\d+", tiny ? "=s48" : "=s240");
-            File.WriteAllBytes(Path.Combine(dir, name), Http.GetByteArrayAsync(url).GetAwaiter().GetResult());
+            var pic = Http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+            if (pic.Length == 0) return null;
+            File.WriteAllBytes(Path.Combine(dir, name), pic);
             return name;
         }
         catch (Exception) { return null; }

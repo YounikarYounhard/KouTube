@@ -203,7 +203,9 @@ if (args.Contains("--online") || args.Contains("--picks"))
     Check(noPhonk.Count == 1 && noPhonk[0].Id == "p3aaaaaaaaa", "an excluded word keeps a video out, by title or channel: " + string.Join(",", noPhonk.Select(p => p.Id)));
     Lib.Update(c => c with { Exclude = [] });
     Check(Recommend.IsMusic("Heart boom - KPHK (Super Slowed)", "Stxrlight") && Recommend.IsMusic("𝙃𝙚𝙖𝙧𝙩 𝙗𝙤𝙤𝙢", "X") && Recommend.IsMusic("Honeypie - JAWNY | Ashswag Edit", "ItzSkirk")
-        && Recommend.IsMusic("Night drive", "Phonkero 🎼") && Recommend.IsMusic("Song", "Artist - Topic"), "music videos are recognised");
+        && Recommend.IsMusic("Night drive", "Phonkero 🎼") && Recommend.IsMusic("Song", "Artist - Topic")
+        && Recommend.IsMusic("Gojo 🥶 #jjk #gojoedit", "X") && Recommend.IsMusic("Who's next 💀 #capcut #fyp", "X"), "music videos and edits are recognised");
+    Check(!Recommend.IsMusic("Как получить кредит? #credit", "Банки"), "a credit is no edit");
     Check(!Recommend.IsMusic("T2x2 ИГРАЕТ в ПРИВЕТ СОСЕД 2", "Берлога T2x2") && !Recommend.IsMusic("Как я напоролся на ПОДСТАВУ при ремонте", "notebook-31"), "ordinary videos are not music");
     Check(Recommend.Words("Купил ТЕБЯ после 2026 который Майнкрафт").SequenceEqual(["купил", "майнкрафт"]), "filler words and years are no topics");
     Check(Recommend.Script("कुछ नया देखो") == 'o' && Recommend.Script("Привет, мир") == 'c' && Recommend.Script("🔥🔥") == ' ', "titles' writing systems");

@@ -29,6 +29,8 @@ public partial class PickWindow : Window
         Target.SelectedItem = m;
         Split.Value = m.Storage.Budget.ShortsShare * 100;
         FillAll.IsChecked = c.FillAll;
+        Closed += (_, _) => Pick.Pics.Clear();      // hundreds of covers: they go with the window
+        WatchLater.IsChecked = c.UseWatchLater;
         AccountUi();
         Chips();
         Show(1);
@@ -161,6 +163,8 @@ public partial class PickWindow : Window
         AccountBtn.Content = Account.SignedIn ? "Выйти" : "Войти в YouTube";
     }
 
+    void OnWatchLater(object sender, RoutedEventArgs e) => Lib.Update(c => c with { UseWatchLater = WatchLater.IsChecked == true });
+
     void OnAccount(object sender, RoutedEventArgs e)
     {
         if (Account.SignedIn) Account.SignOut(); else Account.SignIn(this);
@@ -273,6 +277,7 @@ public partial class PickWindow : Window
         void St(string s, double f) => Ui.OnUi(() => { RingStatus.Text = s; SetRing(_ring = Math.Max(_ring, f)); });
         try
         {
+            if (!await Tools.Wait(s => St(s, 0))) { PickStatus.Text = RingStatus.Text; return; }
             St(Account.SignedIn ? "Смотрю вашу историю на YouTube…" : "Смотрю вашу библиотеку…", 0.01);
             var hist = await Task.Run(Account.History);
             St("Смотрю ваши подписки…", 0.04);

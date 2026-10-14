@@ -112,7 +112,7 @@ public partial class MainWindow : Window
         ShowLibrary();
         UpdatePlan();
         if (Tools.Missing().Length > 0)
-            try { await Tools.Fetch(Status); Status("yt-dlp, ffmpeg и deno скачаны — всё готово"); }
+            try { await (Tools.Ready = Tools.Fetch(Status)); Status("yt-dlp, ffmpeg и deno скачаны — всё готово"); }
             catch (Exception ex) { Status($"Не удалось скачать {Tools.Missing()}: {ex.Message} — проверьте интернет и перезапустите KouTube"); }
         _ = Task.Run(() => { var r = Tools.UpdateYtDlp(); Ui.OnUi(() => ToolsText.Text = "yt-dlp: " + r); });
         await RefreshAll();

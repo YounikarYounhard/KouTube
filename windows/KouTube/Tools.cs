@@ -26,6 +26,18 @@ public static class Tools
     public static string Missing() => string.Join(", ", new[] { "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe" }
         .Where(f => !File.Exists(Path.Combine(Dir, f))));
 
+    /// <summary>The first start's download of the tools; queue and picking wait for it.</summary>
+    public static Task Ready = Task.CompletedTask;
+
+    /// <summary>Waits for <see cref="Ready"/>; false (and says why) when a tool is still missing.</summary>
+    public static async Task<bool> Wait(Action<string> status)
+    {
+        if (!Ready.IsCompleted) status("Жду, пока докачаются yt-dlp, ffmpeg и deno…");
+        try { await Ready; } catch (Exception) { }
+        if (Missing() is { Length: > 0 } miss) { status($"Нет {miss} — без них KouTube не может качать. Проверьте интернет и перезапустите программу."); return false; }
+        return true;
+    }
+
     /// <summary>First start of the bare exe: yt-dlp, ffmpeg + ffprobe and deno (~200 MB, once) from their own GitHub releases.</summary>
     public static async Task Fetch(Action<string> status)
     {

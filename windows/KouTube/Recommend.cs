@@ -265,7 +265,7 @@ public static class Recommend
                             "Shorts с главной YouTube", $"https://i.ytimg.com/vi/{s.Id}/oar2.jpg"))];
             }));
             jobs.Add(("Shorts из подписок", () => Parse(Account.Feed("https://www.youtube.com/feed/subscriptions/shorts", 300), "Shorts из подписок", 2, true, null, _ => true, 1)));
-            jobs.Add(("«Смотреть позже»", () => Parse(Account.Feed(":ytwatchlater", 300), "«Смотреть позже»", 2, false, null, _ => true)));
+            if (c.UseWatchLater) jobs.Add(("«Смотреть позже»", () => Parse(Account.Feed(":ytwatchlater", 300), "«Смотреть позже»", 2, false, null, _ => true)));
             jobs.Add(("ваши подписки", () => Parse(Account.Feed(":ytsubs", 200), "ваши подписки", 1, false, null, p => Fresh(p, null))));
         }
 
@@ -385,7 +385,8 @@ public static class Recommend
 
     /// <summary>Lower case with fancy letters made plain: 𝙋𝙃𝙊𝙉𝙆 and ＰＨＯＮＫ are "phonk" too.</summary>
     static readonly HashSet<string> MusicWords = ["phonk", "фонк", "slowed", "reverb", "remix", "ремикс", "nightcore", "mashup", "мэшап", "lofi", "funk",
-        "jumpstyle", "hardstyle", "amv", "edit", "edits", "эдит", "lyrics", "speedup", "spedup", "клип"];
+        "jumpstyle", "hardstyle", "amv", "edit", "edits", "эдит", "эдиты", "lyrics", "speedup", "spedup", "клип", "capcut", "velocity", "alightmotion",
+        "aftereffects", "sigmaedit"];
     static readonly string[] MusicPhrases = ["sped up", "speed up", "type beat", "official audio", "official music video", "music video", "bass boosted",
         "8d audio", "full album", "(audio", "audio)", "текст песни"];
 
@@ -400,7 +401,9 @@ public static class Recommend
         if (raw.Contains('\uD835') || raw.Contains("🎼") || raw.Contains("🎵") || raw.Contains("🎶") || raw.Contains("🎧")) return true;
         if (channel != null && (channel.EndsWith(" - Topic") || Regex.IsMatch(channel, @"\b(music|records|vevo|phonk|edits?)\b", RegexOptions.IgnoreCase))) return true;
         var t = Plain(title);
-        return MusicPhrases.Any(t.Contains) || Regex.Split(t, @"[^\p{L}\p{Nd}]+").Any(MusicWords.Contains);
+        // #animeedit, #gojoedit, #phonkmusic, #capcut, #velocity: an edit often says so only in its hashtags
+        return MusicPhrases.Any(t.Contains) || Regex.Split(t, @"[^\p{L}\p{Nd}]+").Any(w => MusicWords.Contains(w)
+            || (w.EndsWith("edit") || w.EndsWith("edits")) && w is not ("credit" or "credits") || w.Contains("phonk") || w.Contains("фонк"));
     }
 
     static string Plain(string s) => s.Normalize(System.Text.NormalizationForm.FormKC).ToLowerInvariant();

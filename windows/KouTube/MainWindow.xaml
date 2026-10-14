@@ -249,8 +249,15 @@
                     <Button x:Name="FindBtn" Grid.Column="2" Content="Добавить" Margin="8,0,0,0" Click="OnFind" />
                     <Button Grid.Column="3" Content="Убрать готовые" Margin="8,0,0,0" Click="OnClean" />
                 </Grid>
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <ItemsControl x:Name="QueueList">
+                <!-- virtualized: only the rows on screen exist (a queue of 1 500 with full-size covers once took gigabytes) -->
+                    <ItemsControl x:Name="QueueList" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                                  VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True">
+                        <ItemsControl.Template>
+                            <ControlTemplate TargetType="ItemsControl">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" CanContentScroll="True"><ItemsPresenter /></ScrollViewer>
+                            </ControlTemplate>
+                        </ItemsControl.Template>
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border Margin="6,0,6,10" Padding="12" CornerRadius="12" Background="#0DFFFFFF">
@@ -262,7 +269,7 @@
                                         <Grid Grid.Column="1" Width="160" Height="90" HorizontalAlignment="Left">
                                             <Grid.Clip><RectangleGeometry Rect="0,0,160,90" RadiusX="8" RadiusY="8" /></Grid.Clip>
                                             <Rectangle Fill="#272727" />
-                                            <Image Source="{Binding Thumb}" Stretch="UniformToFill" />
+                                            <Image Source="{Binding Pic}" Stretch="UniformToFill" />
                                             <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="5" Background="#CC000000" CornerRadius="4" Padding="4,0">
                                                 <TextBlock Text="{Binding Duration}" Foreground="White" FontSize="11" FontWeight="SemiBold" />
                                             </Border>
@@ -289,7 +296,6 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                </ScrollViewer>
             </DockPanel>
 
             <!-- ============ settings ============ -->

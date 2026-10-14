@@ -113,6 +113,15 @@ public sealed class QRow(QueueItem item) : INotifyPropertyChanged
     public string Sb => _item.SbMarked switch { true => "реклама: вырежу " + TimeSpan.FromSeconds(_item.SbCutSec).ToString(@"m\:ss"), false => "рекламу никто не разметил", _ => "" };
     public string Why => string.Join(" · ", new[] { _item.Source, _item.Reason }.Where(s => !string.IsNullOrEmpty(s)));
     public string? Thumb => _item.ThumbUrl;
+    System.Windows.Media.Imaging.BitmapImage? _pic;
+    /// <summary>The cover decoded at the row's size (160 px), made when the row first shows.</summary>
+    public System.Windows.Media.ImageSource? Pic => _pic ??= Thumb is { } u && Uri.TryCreate(u, UriKind.Absolute, out var uri) ? Small(uri) : null;
+    static System.Windows.Media.Imaging.BitmapImage Small(Uri u)
+    {
+        var b = new System.Windows.Media.Imaging.BitmapImage();
+        b.BeginInit(); b.UriSource = u; b.DecodePixelWidth = 160; b.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; b.EndInit();
+        return b;
+    }
     public List<Choice> Variants => _item.Variants ?? [];
     public Choice? Selected
     {
@@ -277,7 +286,7 @@ public static class Downloader
 
     public static async Task Run(Action<string> status)
     {
-        if (_cts != null) return;
+        if (_cts != null || !await Tools.Wait(status)) return;
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
         // null = done, or not worth another try; otherwise yt-dlp's raw error
