@@ -2,6 +2,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Net.Http;
 
 namespace KouTube;
 
@@ -30,6 +32,16 @@ public partial class PickWindow : Window
         AccountUi();
         Chips();
         Show(1);
+        // not signed in: offer it every time — with the account the picks are a different class
+        Loaded += (_, _) =>
+        {
+            if (Account.SignedIn) return;
+            if (MessageBox.Show(this, "Войти в YouTube?\n\nТогда подборка будет как ваша главная: по истории просмотров, подпискам, рекомендациям и «Смотреть позже». " +
+                    "Без входа — только по вашей библиотеке и по каналам и словам, которые вы укажете.", "Подборка", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            Account.SignIn(this);
+            AccountUi();
+            Show(_step);
+        };
     }
 
     void Show(int step)
@@ -76,6 +88,9 @@ public partial class PickWindow : Window
         KeywordChips.Children.Clear();
         foreach (var k in c.Keywords)
             KeywordChips.Children.Add(Pill(k, () => { Lib.Update(x => x with { Keywords = x.Keywords.Where(o => o != k).ToList() }); Chips(); }));
+        ExcludeChips.Children.Clear();
+        foreach (var x in c.Exclude)
+            ExcludeChips.Children.Add(Pill("без «" + x + "»", () => { Lib.Update(o => o with { Exclude = o.Exclude.Where(e => e != x).ToList() }); Chips(); }));
         Suggestions.Children.Clear();
         var it = Recommend.Learn(Lib.Videos());
         foreach (var w in it.Topics.Where(w => !c.Keywords.Contains(w)).Take(14))
@@ -130,7 +145,7 @@ public partial class PickWindow : Window
     {
         var c = Lib.Config;
         if (c.Sources.Count + c.Keywords.Count > 0 || c.LastPickGb != null) { ImplicitText_Box.Visibility = Visibility.Collapsed; return; }
-        var imp = Recommend.Implicit(c, Recommend.Learn(Lib.Videos()));
+        var (imp, _) = Recommend.Implicit(c, Recommend.Learn(Lib.Videos()), false);
         ImplicitText.Text = Account.SignedIn ? "Ничего не выбрано — подберу как YouTube на главной: по вашей истории, подпискам, рекомендациям и «Смотреть позже»."
             : imp.Sources.Count + imp.Keywords.Count == 0 ? "Ничего не выбрано — войдите в YouTube или добавьте хотя бы один канал или слово."
             : "Ничего не выбрано — подберу по вашей библиотеке: " + string.Join(", ", imp.Sources.Select(s => s.Name).Concat(imp.Keywords.Select(k => "«" + k + "»"))) + ".";
@@ -187,6 +202,17 @@ public partial class PickWindow : Window
     void OnChannelKey(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) OnFindChannel(sender, e); }
     void OnKeywordKey(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) OnAddKeyword(sender, e); }
     void OnAddKeyword(object sender, RoutedEventArgs e) { AddKeyword(KeywordBox.Text.Trim()); KeywordBox.Clear(); }
+
+    void OnExcludeKey(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) OnAddExclude(sender, e); }
+
+    void OnAddExclude(object sender, RoutedEventArgs e)
+    {
+        var x = ExcludeBox.Text.Trim();
+        ExcludeBox.Clear();
+        if (x.Length == 0 || Lib.Config.Exclude.Contains(x, StringComparer.OrdinalIgnoreCase)) return;
+        Lib.Update(c => c with { Exclude = [.. c.Exclude, x] });
+        Chips();
+    }
 
     void AddKeyword(string k)
     {
@@ -252,22 +278,26 @@ public partial class PickWindow : Window
             St("Смотрю ваши подписки…", 0.04);
             var subs = await Task.Run(Account.Subscriptions);
             var it = Recommend.Learn(Lib.Videos(), hist, subs);
-            var c = Recommend.Implicit(Lib.Config, it);
+            var (c, shortChannels) = Recommend.Implicit(Lib.Config, it, Account.SignedIn && hist != null);
             var total = (long)(Total.Value * Gb);
             var shorts = (long)(total * Split.Value / 100);
-            var (depth, shortDepth) = Recommend.Depth(c, it, total - shorts, shorts);
-            var cands = await Task.Run(() => Recommend.Candidates(c, (s, f) => St(s, 0.08 + 0.87 * f), depth, shortDepth));
-            St("Выбираю лучшее…", 0.97);
+            var (depth, shortDepth) = Recommend.Depth(c, it, total - shorts, shorts, shortChannels.Count);
+            var cands = await Task.Run(() => Recommend.Candidates(c, shortChannels, (s, f) => St(s, 0.08 + 0.8 * f), depth, shortDepth));
+            St("Выбираю лучшее…", 0.89);
             var skip = Lib.DoNotDownload();
             skip.UnionWith(Lib.Config.Seen);
+            skip.UnionWith(Lib.Config.NotInterested.Select(x => x.Id));
             skip.UnionWith(hist?.Select(h => h.Id) ?? []);         // already watched on YouTube
             foreach (var r in Downloader.Rows) skip.Add(r.Item.Id);
             // links you added: in, unless already downloaded (then they leave the list for good)
             var wanted = Lib.Config.Wanted.Where(w => !skip.Contains(w.Id)).ToList();
             if (wanted.Count != Lib.Config.Wanted.Count) Lib.Update(x => x with { Wanted = Lib.Config.Wanted.Where(w => !Lib.DoNotDownload().Contains(w.Id)).ToList() });
-            var ranked = Recommend.Rank(cands, it, skip).Where(p => wanted.All(w => w.Id != p.Id)).ToList();
+            var ranked = Recommend.Diversify(Recommend.Rank(cands, it, skip).Where(p => wanted.All(w => w.Id != p.Id)).ToList(),
+                Lib.Videos().Select(v => v.Title).Concat(hist?.Select(h => h.Title) ?? []));
             Lib.Update(x => x with { LastPickGb = Total.Value });
             _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true).Fill();
+            // the list appears whole: every cover is here before it shows, so it scrolls without holes
+            await Preload([.. _sel.Videos, .. _sel.Shorts, .. _sel.Spare], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
             VideoPicks.ItemsSource = _sel.Videos;
             ShortPicks.ItemsSource = _sel.Shorts;
             _sel.Videos.CollectionChanged += (_, _) => Headers();
@@ -275,10 +305,34 @@ public partial class PickWindow : Window
             Headers();
             PickStatus.Text = (hist == null ? "YouTube не отдал вашу историю — похоже, вход устарел: «Назад» → «Выйти» → «Войти в YouTube». " : "")
                 + (ranked.Count == 0 ? "Подходящих новых видео не нашлось — войдите в YouTube, добавьте каналы или ключевые слова."
-                    : "✕ — убрать видео, на его место встанет следующее. Глаз — уже смотрел, больше не предлагать. Ни то ни другое не портит рекомендации.");
+                    : "✕ — не хочу такое: на его место встанет следующее, этот канал и тема опустятся, после двух ✕ канал больше не предлагается. Глаз — уже видел, просто убрать.");
         }
         catch (Exception ex) { PickStatus.Text = "Не удалось подобрать: " + ex.Message; }
         finally { PickProgress.Visibility = Visibility.Collapsed; }
+    }
+
+    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+    static async Task Preload(List<Pick> picks, Action<double> progress)
+    {
+        var todo = picks.Where(p => p.Thumb != null && !Pick.Pics.ContainsKey(p.Thumb)).DistinctBy(p => p.Thumb).ToList();
+        var done = 0;
+        await Parallel.ForEachAsync(todo, new ParallelOptions { MaxDegreeOfParallelism = 12 }, async (p, ct) =>
+        {
+            try
+            {
+                var b = new BitmapImage();
+                b.BeginInit();
+                b.CacheOption = BitmapCacheOption.OnLoad;
+                b.DecodePixelWidth = p.Kind == "short" ? 150 : 250;      // the card's size: hundreds of Shorts stay light
+                b.StreamSource = new MemoryStream(await Http.GetByteArrayAsync(p.Thumb, ct));
+                b.EndInit();
+                b.Freeze();
+                Pick.Pics[p.Thumb!] = b;
+            }
+            catch (Exception) { }       // no cover now: the card tries again itself
+            progress(Interlocked.Increment(ref done) / (double)Math.Max(1, todo.Count));
+        });
     }
 
     void Headers()
@@ -294,8 +348,9 @@ public partial class PickWindow : Window
     void OnRemovePick(object sender, RoutedEventArgs e)
     {
         if ((sender as Button)?.Tag is not Pick p) return;
-        if (p.Source == "ссылка") Lib.Update(c => c with { Wanted = c.Wanted.Where(w => w.Id != p.Id).ToList() });   // you took it back
-        _sel?.Remove(p);
+        if (p.Source == "ссылка") { Lib.Update(c => c with { Wanted = c.Wanted.Where(w => w.Id != p.Id).ToList() }); _sel?.Remove(p); return; }   // you took it back
+        Lib.Update(c => c with { NotInterested = [.. c.NotInterested, new Nope(p.Id, p.Title, p.Channel)] });
+        _sel?.Remove(p, dislike: true);
     }
 
     /// <summary>Watched on YouTube already: out of this pick and every later one; likes and dislikes are left alone.</summary>

@@ -166,6 +166,37 @@ var fx = Path.Combine(dir?.FullName ?? throw new Exception("spec/fixtures not fo
 int failed = 0, passed = 0;
 void Check(bool ok, string what) { if (ok) passed++; else { failed++; Console.WriteLine("FAIL: " + what); } }
 
+// picking without a library: variety, stream cuts, writing systems, «fill completely» (runs everywhere, CI too)
+{
+    // variety: one channel does not take the whole list, and one stream cut by several channels comes once
+    var same = Enumerable.Range(0, 5).Select(i => new Pick($"x{i:D10}", "u", $"Тема номер {i} совсем другая история {i}", "Один", 600, null, "video", 5 - i * 0.1, "", "s")).ToList();
+    var other = new Pick("y0000000000", "u", "Совершенно иное видео про космос", "Другой", 600, null, "video", 3, "", "s");
+    var cut1 = new Pick("z0000000001", "u", "БРАТИШКИН СМОТРИТ: Невероятные Происшествия на Складах", "Нарезки 1", 600, null, "video", 2.5, "", "s");
+    var cut2 = new Pick("z0000000002", "u", "Братишкин смотрит невероятные происшествия на складах!!!", "Нарезки 2", 600, null, "video", 2.4, "", "s");
+    var div = Recommend.Diversify([.. same, other, cut1, cut2], []);
+    Check(div.FindIndex(p => p.Id == other.Id) < 3, "a second channel gets in before the third video of the first: " + string.Join(" ", div.Select(p => p.Channel)));
+    Check(div.Count(p => p.Id.StartsWith('z')) == 1, "the same stream cut by two channels comes once");
+    // words you never want: in the title or the channel name, fancy letters included
+    Lib.Update(c => c with { Exclude = ["phonk"] });
+    var noPhonk = Recommend.Rank([new("p1aaaaaaaaa", "u", "BRAZILIAN 𝙋𝙃𝙊𝙉𝙆 mix", "X", 120, null, "video", 0, "", "s"),
+        new("p2aaaaaaaaa", "u", "night drive", "Phonkero", 120, null, "video", 0, "", "s"), new("p3aaaaaaaaa", "u", "Кот учит физику", "Y", 600, null, "video", 0, "", "s")],
+        Recommend.Learn([]), []);
+    Check(noPhonk.Count == 1 && noPhonk[0].Id == "p3aaaaaaaaa", "an excluded word keeps a video out, by title or channel: " + string.Join(",", noPhonk.Select(p => p.Id)));
+    Lib.Update(c => c with { Exclude = [] });
+    Check(Recommend.Script("कुछ नया देखो") == 'o' && Recommend.Script("Привет, мир") == 'c' && Recommend.Script("🔥🔥") == ' ', "titles' writing systems");
+
+    // «Заполнить полностью»: a video just over its share borrows from the Shorts; what no video fits gets more Shorts
+    Pick V(string id, double min) => new(id, "u", id, "C", min * 60, null, "video", 0, "", "s");
+    var pool = new List<Pick> { V("a0000000000", 20), V("b0000000000", 10) };
+    pool.AddRange(Enumerable.Range(0, 60).Select(i => new Pick($"s{i:D10}", "u", "s", "C", 45, null, "short", 0, "", "s")));
+    long vb = pool[0].Estimate + pool[1].Estimate / 2, sb = 40 * pool[2].Estimate;
+    var plain = new Recommend.Selection(pool, vb, sb).Fill();
+    var full = new Recommend.Selection(pool, vb, sb, null, true).Fill();
+    Check(plain.Videos.Count == 1 && plain.Shorts.Count == 40, $"without the box every part keeps its own budget: {plain.Videos.Count} + {plain.Shorts.Count}");
+    Check(full.Videos.Count == 2 && full.Used(false) + full.Used(true) <= vb + sb && full.Used(false) + full.Used(true) > vb + sb - pool[2].Estimate,
+        $"with it the 10-minute video gets in and Shorts fill the rest to the brim: {full.Videos.Count} + {full.Shorts.Count}");
+}
+
 // a whole pick on the real YouTube account (its cookies from the real home): history with watch progress,
 // subscriptions, every list, ranking, 12 GB filled — prints what it would download and why
 if (args.Contains("--account"))
@@ -177,15 +208,17 @@ if (args.Contains("--account"))
     var subs = Account.Subscriptions();
     Console.WriteLine($"history {hist.Count} (progress known {hist.Count(h => h.Percent != null)}, finished {hist.Count(h => h.Percent >= 90)}), subscriptions {subs.Count} — {sw.Elapsed.TotalSeconds:0}s");
     var it = Recommend.Learn([], hist, subs);
-    var c = Recommend.Implicit(Lib.Config with { MaxAgeDays = 14 }, it);
+    var (c, shortChannels) = Recommend.Implicit(Lib.Config with { MaxAgeDays = 14 }, it, true);
     const long gb = 1L << 30;
-    var (d, sd) = Recommend.Depth(c, it, 10 * gb, 2 * gb);
-    Console.WriteLine($"implicit: {string.Join(", ", c.Sources.Select(s => s.Name))} | {string.Join(", ", c.Keywords)} | depth {d}/{sd}");
-    var cands = Recommend.Candidates(c, (s, f) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, d, sd);
-    var ranked = Recommend.Rank(cands, it, [.. hist.Select(h => h.Id)]);
+    var (d, sd) = Recommend.Depth(c, it, 10 * gb, 2 * gb, shortChannels.Count);
+    Console.WriteLine($"channels: {string.Join(", ", c.Sources.Select(s => s.Name))} | Shorts from {shortChannels.Count} channels | depth {d}/{sd} | scripts {string.Concat(it.Scripts)}");
+    var cands = Recommend.Candidates(c, shortChannels, (s, f) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, d, sd);
+    var ranked = Recommend.Diversify(Recommend.Rank(cands, it, [.. hist.Select(h => h.Id)]), hist.Select(h => h.Title));
     var sel = new Recommend.Selection(ranked, 10 * gb, 2 * gb, null, true).Fill();
     Console.WriteLine($"candidates {cands.Count}, ranked {ranked.Count}; picked {sel.Videos.Count} videos {Ui.Gb(sel.Used(false))} + {sel.Shorts.Count} Shorts {Ui.Gb(sel.Used(true))} — {sw.Elapsed.TotalSeconds:0}s");
-    foreach (var pk in sel.Videos.Take(12)) Console.WriteLine($"  {pk.Score,5:0.0}  {pk.Title[..Math.Min(60, pk.Title.Length)]}  ← {pk.Reason}");
+    foreach (var pk in sel.Videos.Take(25)) Console.WriteLine($"  {pk.Score,5:0.0}  {pk.Title[..Math.Min(60, pk.Title.Length)]}  ← {pk.Reason}");
+    Console.WriteLine("  Shorts by channel: " + string.Join(", ", sel.Shorts.GroupBy(s => s.Channel ?? "?").OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key} {g.Count()}")));
+    Console.WriteLine($"  Shorts: {sel.Shorts.Select(s => s.Channel).Distinct().Count()} channels; videos: {sel.Videos.Select(s => s.Channel).Distinct().Count()} channels");
     Check(hist.Count(h => h.Percent != null) > hist.Count / 3, "the history knows how much of each video you watched");
     Check(sel.Used(false) + sel.Used(true) > 11.5 * gb, "12 GB are filled");
     Console.WriteLine($"{passed} passed, {failed} failed");
@@ -360,22 +393,12 @@ if (src.All(File.Exists))
         Check(sel.Videos.Count == 2 && sel.Videos[0].Id == "eeeeeeeeeee" && sel.Videos[1].Id == ranked[0].Id,
             "a linked video comes first and the best of the rest fills the space left: " + string.Join(" | ", sel.Videos.Select(v => v.Id)));
 
-        // «Заполнить полностью»: a video just over its share borrows from the Shorts; what no video fits gets more Shorts
-        Pick V(string id, double min) => new(id, "u", id, "C", min * 60, null, "video", 0, "", "s");
-        var pool = new List<Pick> { V("a0000000000", 20), V("b0000000000", 10) };
-        pool.AddRange(Enumerable.Range(0, 60).Select(i => new Pick($"s{i:D10}", "u", "s", "C", 45, null, "short", 0, "", "s")));
-        long vb = pool[0].Estimate + pool[1].Estimate / 2, sb = 40 * pool[2].Estimate;
-        var plain = new Recommend.Selection(pool, vb, sb).Fill();
-        var full = new Recommend.Selection(pool, vb, sb, null, true).Fill();
-        Check(plain.Videos.Count == 1 && plain.Shorts.Count == 40, $"without the box every part keeps its own budget: {plain.Videos.Count} + {plain.Shorts.Count}");
-        Check(full.Videos.Count == 2 && full.Used(false) + full.Used(true) <= vb + sb && full.Used(false) + full.Used(true) > vb + sb - pool[2].Estimate,
-            $"with it the 10-minute video gets in and Shorts fill the rest to the brim: {full.Videos.Count} + {full.Shorts.Count}");
     }
 
     // ---------- picking from YouTube (network): a keyword with "only new" finds plenty ----------
     if (args.Contains("--online") || args.Contains("--picks"))
     {
-        var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
+        var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, [], (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
         Console.WriteLine($"  «путешествие», только новые: {kp.Count(p => p.Kind == "video")} видео, {kp.Count(p => p.Kind == "short")} Shorts");
         Check(kp.Count(p => p.Kind == "video") >= 30 && kp.Count(p => p.Kind == "short") >= 20, "a keyword with «only new» finds plenty of videos and #hashtag Shorts");
     }
@@ -386,7 +409,7 @@ if (src.All(File.Exists))
         var found = Recommend.FindChannels("Vert Dider");
         Check(found.Any(f => f.Name == "Vert Dider" && f.Subscribers > 1_000_000), "channel search by name finds Vert Dider");
         Lib.Update(c => c with { Sources = [new Source(found.First(f => f.Name == "Vert Dider").Url, "Vert Dider", "channel")], PerSource = 5, MaxAgeDays = 60 });
-        var picks = Recommend.Candidates(Lib.Config, (_, _) => { }, 5, 5);
+        var picks = Recommend.Candidates(Lib.Config, Lib.Config.Sources, (_, _) => { }, 5, 5);
         Console.WriteLine($"  candidates: {picks.Count} ({picks.Count(p => p.Kind == "short")} shorts)");
         Check(picks.Count > 0 && picks.Where(p => p.Published != null).All(p => (DateTimeOffset.UtcNow - p.Published!.Value).TotalDays <= 61), "candidates respect the date window");
         // covers: a frame cut while YouTube was out of reach gives way to YouTube's own big picture

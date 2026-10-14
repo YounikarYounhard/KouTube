@@ -78,6 +78,8 @@ public record Config
     public int? MaxAgeDays { get; init; }
     /// <summary>Topics searched on YouTube when picking ("майнкрафт моды", "космос").</summary>
     public List<string> Keywords { get; init; } = [];
+    /// <summary>Words that keep a video out of every pick, in its title or channel name ("phonk", "asmr").</summary>
+    public List<string> Exclude { get; init; } = [];
     /// <summary>Top comments fetched per video (0 = none, up to 1000). They weigh next to nothing.</summary>
     public int Comments { get; init; } = 100;
     /// <summary>Channel name → its picture, so each channel is looked up once.</summary>
@@ -88,6 +90,8 @@ public record Config
     public List<Wanted> Wanted { get; init; } = [];
     /// <summary>IDs once added by link: a strong "more like this" for recommendations after they leave <see cref="Wanted"/>.</summary>
     public List<string> Linked { get; init; } = [];
+    /// <summary>✕ in «Подборка»: not offered again, and its channel and topic go down.</summary>
+    public List<Nope> NotInterested { get; init; } = [];
     /// <summary>How many GB the last pick filled — for «Как в прошлый раз».</summary>
     public double? LastPickGb { get; init; }
     /// <summary>«Заполнить место полностью»: videos and Shorts lend each other room so nothing is left empty.</summary>
@@ -95,6 +99,8 @@ public record Config
 }
 
 public record Wanted(string Id, string Url, string Title, string? Channel, double? DurationSec, string Kind);
+
+public record Nope(string Id, string Title, string? Channel);
 
 public record Source(string Url, string Name, string Kind, int? MinAgeDays = null, int? MaxAgeDays = null);
 

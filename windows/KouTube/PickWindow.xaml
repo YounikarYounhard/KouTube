@@ -42,7 +42,7 @@
                     <Grid Width="250" Height="141">
                         <Grid.Clip><RectangleGeometry Rect="0,0,250,141" RadiusX="10" RadiusY="10" /></Grid.Clip>
                         <Rectangle Fill="#272727" />
-                        <Image Source="{Binding Thumb}" Stretch="UniformToFill" />
+                        <Image Source="{Binding Img}" Stretch="UniformToFill" />
                         <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="6" Background="#CC000000" CornerRadius="4" Padding="4,1">
                             <TextBlock Text="{Binding DurationText}" Foreground="White" FontSize="12" FontWeight="SemiBold" />
                         </Border>
@@ -53,9 +53,9 @@
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6">
                     <Button Style="{StaticResource X}" Content="&#xE890;" Tag="{Binding}" Click="OnSeenPick" Margin="0,0,6,0"
-                            ToolTip="Уже смотрел на YouTube — больше не предлагать. На рекомендации не влияет" />
+                            ToolTip="Уже видел — больше не предлагать. На рекомендации не влияет" />
                     <Button Style="{StaticResource X}" Content="&#xE711;" Tag="{Binding}" Click="OnRemovePick"
-                            ToolTip="Убрать — на его место встанет следующее. На рекомендации не влияет" />
+                            ToolTip="Не хочу такое — на его место встанет следующее, канал и тема опустятся" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -64,7 +64,7 @@
             <Grid Width="150" Height="267" Margin="0,0,12,16">
                 <Grid.Clip><RectangleGeometry Rect="0,0,150,267" RadiusX="10" RadiusY="10" /></Grid.Clip>
                 <Rectangle Fill="#272727" />
-                <Image Source="{Binding Thumb}" Stretch="UniformToFill" />
+                <Image Source="{Binding Img}" Stretch="UniformToFill" />
                 <Border VerticalAlignment="Bottom" Padding="8,20,8,8">
                     <Border.Background>
                         <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000" Offset="0" /><GradientStop Color="#CC000000" Offset="1" /></LinearGradientBrush>
@@ -73,9 +73,9 @@
                 </Border>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6">
                     <Button Style="{StaticResource X}" Content="&#xE890;" Tag="{Binding}" Click="OnSeenPick" Margin="0,0,6,0"
-                            ToolTip="Уже смотрел на YouTube — больше не предлагать. На рекомендации не влияет" />
+                            ToolTip="Уже видел — больше не предлагать. На рекомендации не влияет" />
                     <Button Style="{StaticResource X}" Content="&#xE711;" Tag="{Binding}" Click="OnRemovePick"
-                            ToolTip="Убрать — на его место встанет следующее. На рекомендации не влияет" />
+                            ToolTip="Не хочу такое — на его место встанет следующее, канал и тема опустятся" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -154,6 +154,14 @@
                     </StackPanel>
                     <TextBlock x:Name="SuggestTitle" Text="Подсказки — из того, что вы смотрите:" Opacity="0.7" Margin="0,12,0,6" />
                     <WrapPanel x:Name="Suggestions" />
+
+                    <TextBlock Text="Не показывать" FontSize="22" FontWeight="SemiBold" Margin="0,26,0,0" />
+                    <TextBlock Text="Видео, у которых в названии или имени канала есть одно из этих слов, в подборку не попадут — например phonk, slowed, asmr." Opacity="0.7" Margin="0,4,0,8" TextWrapping="Wrap" />
+                    <WrapPanel x:Name="ExcludeChips" />
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBox x:Name="ExcludeBox" Width="400" Height="34" VerticalContentAlignment="Center" KeyDown="OnExcludeKey" />
+                        <Button Content="Добавить" Margin="8,0,0,0" Click="OnAddExclude" />
+                    </StackPanel>
 
                     <TextBlock Text="Насколько свежие" FontSize="22" FontWeight="SemiBold" Margin="0,26,0,8" />
                     <RadioButton x:Name="AgeAny" Content="Любые" GroupName="age" Margin="0,3" />

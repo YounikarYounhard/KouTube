@@ -19,7 +19,7 @@ public static class Account
     static readonly SemaphoreSlim One = new(1, 1);
 
     /// <summary><paramref name="Percent"/>: how much of it you watched (YouTube's red bar), null when YouTube shows none.</summary>
-    public record Watched(string Id, string Title, string? Channel, string? ChannelId, int? Percent);
+    public record Watched(string Id, string Title, string? Channel, string? ChannelId, int? Percent, double? Seconds = null);
     public record Channel(string Id, string Name);
 
     public static bool SignIn(Window owner)
@@ -71,51 +71,64 @@ public static class Account
         try { File.Delete(CookieFile); } catch (Exception) { }     // if the WebView still holds its folder, the cookies at least go
     }
 
-    /// <summary>One of the account's lists (":ythistory", ":ytrec", ":ytsubs", ":ytwatchlater") as yt-dlp's flat JSON.</summary>
-    public static JsonElement Feed(string feed, int n, string? pagesTo = null)
+    /// <summary>One of the account's lists (":ytrec", ":ytsubs", ":ytwatchlater", a feed URL) as yt-dlp's flat JSON.</summary>
+    public static JsonElement Feed(string feed, int n) => FeedPages(feed, n, false).Json;
+
+    /// <summary>The same, plus the raw pages YouTube sent (yt-dlp --write-pages): they hold what its list leaves out.</summary>
+    public static (JsonElement Json, string Pages) FeedPages(string feed, int n, bool pages = true)
     {
         One.Wait();
+        var dir = Path.Combine(Dir, "pages");
         try
         {
-            return Tools.Json(Tools.YtDlp, ["--cookies", CookieFile, "--flat-playlist", "-J", "--playlist-end", n.ToString(), "--no-warnings",
-                "--extractor-args", "youtubetab:approximate_date", .. pagesTo != null ? ["--write-pages"] : Array.Empty<string>(), feed], 300_000, pagesTo);
+            if (pages) { try { Directory.Delete(dir, true); } catch (Exception) { } Directory.CreateDirectory(dir); }
+            var j = Tools.Json(Tools.YtDlp, ["--cookies", CookieFile, "--flat-playlist", "-J", "--playlist-end", n.ToString(), "--no-warnings",
+                "--extractor-args", "youtubetab:approximate_date", .. pages ? ["--write-pages"] : Array.Empty<string>(), feed], 300_000, pages ? dir : null);
+            return (j, pages ? string.Concat(Directory.GetFiles(dir, "*.dump").Order().Select(File.ReadAllText)) : "");
         }
-        finally { One.Release(); }
+        finally
+        {
+            if (pages) try { Directory.Delete(dir, true); } catch (Exception) { }
+            One.Release();
+        }
     }
 
     /// <summary>
     /// What you watched on YouTube lately. The history feed has no dates, so «the last few months» is the
-    /// newest 400 entries. Null when YouTube refused (the sign-in went stale).
+    /// newest 800 entries. Null when YouTube refused (the sign-in went stale).
     /// </summary>
     public static List<Watched>? History()
     {
         if (!SignedIn) return [];
-        // yt-dlp's list leaves out how much you watched; the raw pages it saves (--write-pages) have it
-        var pages = Path.Combine(Dir, "pages");
         try
         {
-            Directory.CreateDirectory(pages);
-            var j = Feed(":ythistory", 400, pages);
-            var pct = Progress(pages);
-            return !j.TryGetProperty("entries", out var es) ? [] : es.EnumerateArray()
+            var (j, pages) = FeedPages(":ythistory", 800);
+            var raw = Lockups(pages).DistinctBy(w => w.Id).ToDictionary(w => w.Id);
+            // Shorts are no lockups: they come from yt-dlp's list, without channel or progress
+            return !j.TryGetProperty("entries", out var es) ? [.. raw.Values] : es.EnumerateArray()
                 .Where(e => e.ValueKind == JsonValueKind.Object && S(e, "id") is { Length: 11 })
-                .Select(e => new Watched(S(e, "id")!, S(e, "title") ?? "", S(e, "channel") ?? S(e, "uploader"), S(e, "channel_id"),
-                    pct.TryGetValue(S(e, "id")!, out var p) ? p : null)).ToList();
+                .Select(e => (raw.GetValueOrDefault(S(e, "id")!) ?? new Watched(S(e, "id")!, S(e, "title") ?? "", S(e, "channel"), S(e, "channel_id"), null))
+                    with { Seconds = e.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : null }).ToList();
         }
         catch (Exception) { return null; }
-        finally { try { Directory.Delete(pages, true); } catch (Exception) { } }
     }
 
-    /// <summary>Video id → percent watched, from the history pages: each video is a "lockupViewModel" with a progress bar.</summary>
-    static Dictionary<string, int> Progress(string dir)
-    {
-        var d = new Dictionary<string, int>();
-        foreach (var f in Directory.GetFiles(dir, "*.dump"))
-            foreach (var item in File.ReadAllText(f).Split("\"lockupViewModel\"").Skip(1))
-                if (Regex.Match(item, "\"contentId\":\"([\\w-]{11})\"") is { Success: true } id && Regex.Match(item, "\"startPercent\":(\\d+)") is { Success: true } p)
-                    d.TryAdd(id.Groups[1].Value, int.Parse(p.Groups[1].Value));
-        return d;
-    }
+    const string Text = "\"((?:[^\"\\\\]|\\\\.)*)\"";      // a JSON string, escapes and all
+    static readonly Regex LockupId = new("\"contentId\":\"([\\w-]{11})\""), LockupTitle = new("\"lockupMetadataViewModel\":\\{\"title\":\\{\"content\":" + Text),
+        Byline = new("\"metadataParts\":\\[\\{\"text\":\\{\"content\":" + Text), ChannelId = new("\"browseId\":\"(UC[\\w-]{22})\""),
+        Bar = new("\"startPercent\":(\\d+)"), ShortId = new("\"videoId\":\"([\\w-]{11})\""), ShortTitle = new("\"primaryText\":\\{\"content\":" + Text);
+
+    static string Unescape(string s) { try { return JsonSerializer.Deserialize<string>("\"" + s + "\"") ?? s; } catch (JsonException) { return s; } }
+    static string? G(Match m) => m.Success ? Unescape(m.Groups[1].Value) : null;
+
+    /// <summary>Every video on a raw page is a "lockupViewModel": id, title, channel (the byline) with its id, and the red progress bar.</summary>
+    static IEnumerable<Watched> Lockups(string pages) =>
+        pages.Split("\"lockupViewModel\":{").Skip(1).Where(i => LockupId.IsMatch(i)).Select(i => new Watched(LockupId.Match(i).Groups[1].Value,
+            G(LockupTitle.Match(i)) ?? "", G(Byline.Match(i)), G(ChannelId.Match(i)), Bar.Match(i) is { Success: true } p ? int.Parse(p.Groups[1].Value) : null));
+
+    /// <summary>The Shorts shelf on the home page ("shortsLockupViewModel"): YouTube's own Shorts for you.</summary>
+    public static IEnumerable<(string Id, string Title)> ShortsIn(string pages) =>
+        pages.Split("\"shortsLockupViewModel\":{").Skip(1).Where(i => ShortId.IsMatch(i)).Select(i => (ShortId.Match(i).Groups[1].Value, G(ShortTitle.Match(i)) ?? ""));
 
     /// <summary>The channels you are subscribed to — the history feed mostly leaves the channel out, this list has them all.</summary>
     public static List<Channel> Subscriptions()
