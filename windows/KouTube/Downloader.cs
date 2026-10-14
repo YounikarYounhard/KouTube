@@ -314,13 +314,29 @@ public static class Downloader
         try
         {
             var again = new List<(QRow Row, string Error)>();
+            void Done() => status($"Готово {Rows.Count(r => r.Item.Status == Q.Done)} из {Rows.Count(r => r.Item.Include)}");
+            // a Short is a few MB, yet each one waits on YouTube for seconds: six of them at a time; videos go one by one
+            using var lanes = new SemaphoreSlim(6);
+            var shorts = new List<Task>();
+            async Task Lane(QRow row)
+            {
+                try { if (await Go(row, false) is { } e && Passing(e)) lock (again) again.Add((row, e)); Done(); }
+                finally { lanes.Release(); }
+            }
             foreach (var row in Rows.ToList())
             {
                 if (token.IsCancellationRequested) break;
                 if (!row.Item.Include || row.Item.Status != Q.Pending) continue;
-                if (await Go(row, false) is { } err && Passing(err)) again.Add((row, err));
-                status($"Готово {Rows.Count(r => r.Item.Status == Q.Done)} из {Rows.Count(r => r.Item.Include)}");
+                if (row.Item.Kind == "short")
+                {
+                    try { await lanes.WaitAsync(token); } catch (OperationCanceledException) { break; }
+                    shorts.Add(Lane(row));
+                    continue;
+                }
+                if (await Go(row, false) is { } err && Passing(err)) lock (again) again.Add((row, err));
+                Done();
             }
+            await Task.WhenAll(shorts);
             // YouTube's 403 and "are you a bot" usually pass minutes later: one more go at the end — after a 403 with a
             // fresh yt-dlp, after "not a bot" with your YouTube sign-in if there is one
             if (again.Count > 0 && !token.IsCancellationRequested)
@@ -350,16 +366,20 @@ public static class Downloader
             "-f", it.Spec ?? "bv*+ba/b", "--no-playlist", "--newline", "--no-mtime", "--no-warnings",
             "-o", Path.Combine(tmp, "%(uploader).30B - %(title).170B.%(ext)s"),
             "--embed-metadata", "--embed-chapters",
-            "--write-subs", "--sub-langs", string.Join(",", c.SubLangs) + ",-live_chat", "--convert-subs", "vtt", "--sleep-subtitles", "2",
             // YouTube rate-limits subtitles (HTTP 429); a missing subtitle must not cost the whole video
             "--ignore-errors",
-            "--sponsorblock-mark", "all",
             "--progress", "--progress-template", "download:KT %(progress.downloaded_bytes)s|%(progress.total_bytes,progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
             "--print", "after_move:KTFILE %(filepath)s",
         };
-        if (c.AutoSubs) args.Add("--write-auto-subs");
-        args.AddRange(Lib.CommentArgs());
-        if (c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
+        // a Short is a minute of video: subtitles (2 s of waiting each), comments and SponsorBlock cost it more time than the video itself
+        if (it.Kind != "short")
+        {
+            args.AddRange(["--write-subs", "--sub-langs", string.Join(",", c.SubLangs) + ",-live_chat", "--convert-subs", "vtt", "--sleep-subtitles", "2",
+                "--sponsorblock-mark", "all"]);
+            if (c.AutoSubs) args.Add("--write-auto-subs");
+            args.AddRange(Lib.CommentArgs());
+            if (c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
+        }
         if (c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
         if (account) args.AddRange(Account.CookieArgs());
         args.Add(it.Url);
