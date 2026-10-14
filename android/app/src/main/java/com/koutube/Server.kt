@@ -240,7 +240,8 @@ object Server {
         val p = runCatching { json.decodeFromString<PairRequest>(String(r.body)) }.getOrNull() ?: return text(o, 403, "{}")
         if (p.code != code.value) { wrongCodes++; return text(o, 403, "{}") }
         val t = ByteArray(16).also { SecureRandom().nextBytes(it) }.hex()
-        devices.value = devices.value + (t to p.name.take(60))
+        // the same tablet pairing again replaces its old entry instead of piling up copies
+        devices.value = devices.value.filterValues { it != p.name.take(60) } + (t to p.name.take(60))
         prefs.edit().putString("tokens", json.encodeToString(devices.value)).apply()
         text(o, 200, json.encodeToString(PairReply(t, Lib.deviceName)))
     }

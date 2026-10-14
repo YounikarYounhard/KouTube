@@ -73,7 +73,8 @@ public static class Recommend
     /// dropping a video early push down. Counts are kept for the "why" text.
     /// </summary>
     public record Interests(Dictionary<string, double> Channels, Dictionary<string, (int Finished, int Total, int Likes)> Counts,
-        Dictionary<string, double> Words, double MedianMinutes, double ShortsBias, Dictionary<string, int> WordVideos)
+        Dictionary<string, double> Words, double MedianMinutes, double ShortsBias, Dictionary<string, int> WordVideos,
+        Dictionary<string, int> YtSeen, Dictionary<string, string> ChannelIds, HashSet<string> Subscribed)
     {
         /// <summary>Words that make a topic: liked and found in at least two different videos (one title's "откуда" is not a topic).</summary>
         public IEnumerable<string> Topics => Words.Where(x => x.Value > 0 && WordVideos.GetValueOrDefault(x.Key) >= 2).OrderByDescending(x => x.Value).Select(x => x.Key);
@@ -89,6 +90,7 @@ public static class Recommend
     {
         double s = 0;
         if (v.Flags.Rating > 0) s += 2;
+        if (v.Meta.YtId is { } y && Lib.Config.Linked.Contains(y)) s += 1.5;                           // you asked for it by link
         if (v.Flags.Rating < 0) s -= 2.5;
         if (v.Watch.Status == Watch.Finished) s += 1;
         if (v.FileState.State == FileState.ByUser && v.Watch.Status != Watch.Finished) s -= 1.5;         // deleted without watching
@@ -97,7 +99,8 @@ public static class Recommend
         return s;
     }
 
-    public static Interests Learn(List<Video> all)
+    /// <summary>The library, plus (signed in) what you watched on YouTube — each a smaller "yes" than a video you finished here.</summary>
+    public static Interests Learn(List<Video> all, List<Account.Watched>? yt = null, List<Account.Channel>? subs = null)
     {
         var ch = new Dictionary<string, double>();
         var counts = new Dictionary<string, (int, int, int)>();
@@ -114,99 +117,130 @@ public static class Recommend
             }
             foreach (var w in Words(v.Title).Distinct()) { words[w] = words.GetValueOrDefault(w) + sig; inVideos[w] = inVideos.GetValueOrDefault(w) + 1; }
         }
+        var ytSeen = new Dictionary<string, int>();
+        var ids = new Dictionary<string, string>();
+        foreach (var h in yt ?? [])
+        {
+            // watched to the end on YouTube = liked; dropped in the first quarter = not really
+            var sig = h.Percent switch { >= 90 => 1.0, < 25 => -0.3, _ => 0.4 };
+            if (h.Channel is { } c)
+            {
+                ch[c] = ch.GetValueOrDefault(c) + sig;
+                ytSeen[c] = ytSeen.GetValueOrDefault(c) + 1;
+                if (h.ChannelId != null) ids[c] = h.ChannelId;
+            }
+            foreach (var w in Words(h.Title).Distinct()) { words[w] = words.GetValueOrDefault(w) + sig * 0.6; inVideos[w] = inVideos.GetValueOrDefault(w) + 1; }
+        }
+        var subscribed = new HashSet<string>();
+        foreach (var s in subs ?? [])       // a subscription is a firm "I like this channel"
+        {
+            ch[s.Name] = ch.GetValueOrDefault(s.Name) + 1;
+            ids[s.Name] = s.Id;
+            subscribed.Add(s.Name);
+        }
         var liked = all.Where(v => Signal(v) > 0).Select(v => (v.Meta.DurationMs ?? 0) / 60000.0).Where(m => m > 0).Order().ToList();
         if (liked.Count == 0) liked = all.Select(v => (v.Meta.DurationMs ?? 0) / 60000.0).Where(m => m > 0).Order().ToList();
         double Bias(bool shorts) { var l = all.Where(v => v.IsShort == shorts && Signal(v) != 0).ToList(); return l.Count == 0 ? 0 : l.Average(Signal); }
-        return new(ch, counts, words, liked.Count > 0 ? liked[liked.Count / 2] : 20, Bias(true) - Bias(false), inVideos);
+        return new(ch, counts, words, liked.Count > 0 ? liked[liked.Count / 2] : 20, Bias(true) - Bias(false), inVideos, ytSeen, ids, subscribed);
     }
 
     // ---------- candidates from the sources ----------
 
-    /// <summary>The newest videos (and Shorts) of every source, filtered by the publication-age window.</summary>
     /// <summary>
-    /// "Just pick something for me": with no channels or words chosen, the library speaks for itself —
-    /// the channels you like most (those we know the id of from their avatars) and your top topics.
+    /// "Just pick something for me": with no channels or words chosen, the library and your YouTube history
+    /// speak for themselves — the channels you like most (those we know the id of) and your top topics.
     /// </summary>
     public static Config Implicit(Config c, Interests it)
     {
         if (c.Sources.Count + c.Keywords.Count > 0) return c;
-        var chans = it.Channels.Where(x => x.Value > 0 && c.Avatars.ContainsKey(x.Key)).OrderByDescending(x => x.Value).Take(5)
-            .Select(x => new Source("https://www.youtube.com/channel/" + Path.GetFileNameWithoutExtension(c.Avatars[x.Key]), x.Key, "channel")).ToList();
-        var words = it.Topics.Take(3).ToList();
-        return c with { Sources = chans, Keywords = words, PerSource = Math.Min(c.PerSource, 12) };
+        string? Id(string name) => c.Avatars.TryGetValue(name, out var a) ? Path.GetFileNameWithoutExtension(a) : it.ChannelIds.GetValueOrDefault(name);
+        var chans = it.Channels.Where(x => x.Value > 0 && Id(x.Key) != null).OrderByDescending(x => x.Value).Take(6)
+            .Select(x => new Source("https://www.youtube.com/channel/" + Id(x.Key), x.Key, "channel")).ToList();
+        return c with { Sources = chans, Keywords = it.Topics.Take(3).ToList() };
     }
 
-    public static List<Pick> Candidates(Config c, Action<string> status)
+    /// <summary>How far down each list to look so the space can be filled ~3 times over: big budgets need deep lists.</summary>
+    public static (int Videos, int Shorts) Depth(Config c, Interests it, long videoBytes, long shortBytes)
     {
-        var outList = new List<Pick>();
+        var lists = Math.Max(1, c.Sources.Count + c.Keywords.Count);
+        var video = Math.Max(3, it.MedianMinutes) * MbPerMin * (1L << 20);
+        var shorts = 0.75 * MbPerMin * (1L << 20);
+        return ((int)Math.Clamp(videoBytes / video * 3 / lists, Math.Min(c.PerSource, 20), 200),
+                (int)Math.Clamp(shortBytes / shorts * 2 / lists, Math.Min(c.PerSource, 20), 300));
+    }
+
+    static JsonElement Flat(string url, int n) => Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-end", n.ToString(), "--no-warnings",
+        "--extractor-args", "youtubetab:approximate_date", url], 300_000);
+
+    /// <summary>One list (channel tab, search, feed) → picks. <paramref name="prior"/> is the list's own say: YouTube's picks for you start higher.</summary>
+    static List<Pick> Parse(JsonElement j, string source, double prior, bool shortsTab, string? channel, Func<DateTimeOffset?, bool> fresh)
+    {
+        var l = new List<Pick>();
+        if (!j.TryGetProperty("entries", out var es) || es.ValueKind != JsonValueKind.Array) return l;
+        foreach (var e in es.EnumerateArray())
+        {
+            // null: an entry lost with a failed page; channels and playlists among search results have longer ids
+            if (e.ValueKind != JsonValueKind.Object || Str(e, "id") is not { Length: 11 } id) continue;
+            DateTimeOffset? pub = Long(e, "timestamp") is { } ts ? DateTimeOffset.FromUnixTimeSeconds(ts) : null;
+            if (!fresh(pub)) continue;
+            var isShort = shortsTab || (Str(e, "url") ?? "").Contains("/shorts/");
+            l.Add(new Pick(id, (isShort ? "https://www.youtube.com/shorts/" : "https://www.youtube.com/watch?v=") + id, Str(e, "title") ?? id,
+                Str(e, "channel") ?? Str(e, "uploader") ?? channel, Dbl(e, "duration"), pub, isShort ? "short" : "video", prior, "", source, ThumbOf(e, id, isShort)));
+        }
+        return l;
+    }
+
+    /// <summary>
+    /// Everything worth considering, four lists at a time: each source's newest videos and Shorts, YouTube's
+    /// search for each keyword (plus its #hashtag Shorts) and, signed in, «Смотреть позже», YouTube's
+    /// recommendations and the subscriptions feed. <paramref name="status"/> gets the share of lists done.
+    /// </summary>
+    public static List<Pick> Candidates(Config c, Action<string, double> status, int depth, int shortDepth)
+    {
         var now = DateTimeOffset.UtcNow;
+        bool Fresh(DateTimeOffset? pub, Source? s) =>      // Shorts and search results come without a date: they pass the window
+            pub is not { } p || (now - p).TotalDays is var age && age >= (s?.MinAgeDays ?? c.MinAgeDays ?? 0) && age <= (s?.MaxAgeDays ?? c.MaxAgeDays ?? double.MaxValue);
+        var jobs = new List<(string What, Func<List<Pick>> Run)>();
         foreach (var src in c.Sources)
         {
-            foreach (var tab in new[] { "videos", "shorts" })
-            {
-                status($"Смотрю «{src.Name}» ({(tab == "videos" ? "видео" : "Shorts")})…");
-                JsonElement j;
-                try
-                {
-                    j = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-end", c.PerSource.ToString(), "--no-warnings",
-                        "--extractor-args", "youtubetab:approximate_date", src.Url.TrimEnd('/') + "/" + tab], 180_000);
-                }
-                catch (Exception) { continue; }    // a channel without Shorts, or offline
-                if (!j.TryGetProperty("entries", out var es)) continue;
-                foreach (var e in es.EnumerateArray())
-                {
-                    var id = Str(e, "id");
-                    if (id is not { Length: 11 }) continue;
-                    DateTimeOffset? pub = Long(e, "timestamp") is { } ts ? DateTimeOffset.FromUnixTimeSeconds(ts) : null;
-                    var age = pub is { } p ? (now - p).TotalDays : (double?)null;
-                    // Shorts come without a date: they pass the window rather than vanish
-                    if (age != null && (age < (src.MinAgeDays ?? c.MinAgeDays ?? 0) || age > (src.MaxAgeDays ?? c.MaxAgeDays ?? double.MaxValue))) continue;
-                    outList.Add(new Pick(id, tab == "shorts" ? "https://www.youtube.com/shorts/" + id : "https://www.youtube.com/watch?v=" + id,
-                        Str(e, "title") ?? id, src.Name, Dbl(e, "duration"), pub, tab == "shorts" ? "short" : "video", 0, "", src.Name,
-                        ThumbOf(e, id, tab == "shorts")));
-                }
-            }
+            var u = src.Url.TrimEnd('/');
+            jobs.Add(($"«{src.Name}»: видео", () => Parse(Flat(u + "/videos", depth), src.Name, 0, false, src.Name, p => Fresh(p, src))));
+            jobs.Add(($"«{src.Name}»: Shorts", () => Parse(Flat(u + "/shorts", shortDepth), src.Name, 0, true, src.Name, p => Fresh(p, src))));
         }
+        // YouTube's own upload-date filter for "only new" (yt-dlp's ytsearchdate is gone): this week / this month
+        var since = c.MaxAgeDays switch { <= 7 => "&sp=EgIIAw%253D%253D", <= 31 => "&sp=EgIIBA%253D%253D", _ => "" };
         foreach (var kw in c.Keywords)
         {
-            var tag = new string(kw.Where(char.IsLetterOrDigit).ToArray());
+            var tag = new string(kw.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
             if (tag.Length > 0)
-                try
-                {
-                    status($"Ищу Shorts «#{tag}»…");
-                    var h = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--no-warnings", "--playlist-end", c.PerSource.ToString(),
-                        "https://www.youtube.com/hashtag/" + Uri.EscapeDataString(tag.ToLowerInvariant()) + "/shorts"], 180_000);
-                    if (h.TryGetProperty("entries", out var hs))
-                        foreach (var e in hs.EnumerateArray())
-                            if (Str(e, "id") is { Length: 11 } sid)
-                                outList.Add(new Pick(sid, "https://www.youtube.com/shorts/" + sid, Str(e, "title") ?? sid, Str(e, "channel") ?? Str(e, "uploader"),
-                                    Dbl(e, "duration"), null, "short", 0, "", "Shorts «#" + tag + "»", ThumbOf(e, sid, true)));
-                }
-                catch (Exception) { }
-            status($"Ищу «{kw}»…");
-            // "only new" sorts the search by date; YouTube's search gives no dates to filter otherwise
-            var newest = c.MaxAgeDays is <= 30;
-            JsonElement j;
-            try { j = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--no-warnings", $"ytsearch{(newest ? "date" : "")}{c.PerSource}:{kw}"], 180_000); }
-            catch (Exception) { continue; }
-            if (!j.TryGetProperty("entries", out var es)) continue;
-            foreach (var e in es.EnumerateArray())
-            {
-                var id = Str(e, "id");
-                if (id is not { Length: 11 }) continue;
-                var url = Str(e, "url") ?? "";
-                outList.Add(new Pick(id, url.Length > 0 ? url : "https://www.youtube.com/watch?v=" + id, Str(e, "title") ?? id,
-                    Str(e, "channel") ?? Str(e, "uploader"), Dbl(e, "duration"), null, url.Contains("/shorts/") ? "short" : "video", 0, "", "поиск «" + kw + "»",
-                    ThumbOf(e, id, url.Contains("/shorts/"))));
-            }
+                jobs.Add(($"Shorts #{tag}", () => Parse(Flat("https://www.youtube.com/hashtag/" + tag + "/shorts", shortDepth),
+                    "Shorts «#" + tag + "»", 0, true, null, _ => true)));
+            jobs.Add(($"поиск «{kw}»", () => Parse(Flat("https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(kw) + since, Math.Max(depth, 100)),
+                "поиск «" + kw + "»", 0, false, null, _ => true)));
         }
-        return outList.DistinctBy(p => p.Id).ToList();
+        if (Account.SignedIn)
+            foreach (var (feed, name, prior, n) in new[] { (":ytwatchlater", "«Смотреть позже»", 3.0, 300), (":ytrec", "рекомендации YouTube", 1.5, Math.Max(depth * 3, 150)),
+                         (":ytsubs", "ваши подписки", 1.0, Math.Max(depth * 3, 150)) })
+                jobs.Add((name, () => Parse(Account.Feed(feed, n), name, prior, false, null, p => feed == ":ytwatchlater" || Fresh(p, null))));
+
+        var bag = new System.Collections.Concurrent.ConcurrentBag<Pick>();
+        var done = 0;
+        status($"Смотрю {jobs.Count} списков на YouTube…", 0);
+        Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = 4 }, job =>
+        {
+            var what = "Готово: " + job.What;
+            try { foreach (var p in job.Run()) bag.Add(p); }
+            catch (Exception ex) { what = $"Не открылось: {job.What} — {ex.Message}"; }    // a channel without Shorts, a hiccup: the other lists still count
+            status(what, Interlocked.Increment(ref done) / (double)jobs.Count);
+        });
+        // the same video in several lists: the strongest say wins
+        return bag.GroupBy(p => p.Id).Select(g => g.MaxBy(p => p.Score)!).ToList();
     }
 
     /// <summary>Shorts need their own vertical picture; for videos YouTube's 16:9 one by ID.</summary>
     static string ThumbOf(JsonElement e, string id, bool shorts) =>
         shorts && e.TryGetProperty("thumbnails", out var ts) && ts.ValueKind == JsonValueKind.Array && ts.GetArrayLength() > 0
-            ? ts[0].GetProperty("url").GetString()! : $"https://i.ytimg.com/vi/{id}/mqdefault.jpg";
+            && ts[0].ValueKind == JsonValueKind.Object && Str(ts[0], "url") is { } u ? u : $"https://i.ytimg.com/vi/{id}/mqdefault.jpg";
 
     public static double MbPerMin = 6;
 
@@ -224,14 +258,18 @@ public static class Recommend
         return cands.Where(p => !skip.Contains(p.Id)).Select(p =>
         {
             var why = new List<string>();
-            double score = 0;
+            double score = p.Score;                 // «Смотреть позже» and YouTube's own picks start ahead
+            if (p.Score > 0) why.Add(p.Source);
             if (p.Channel != null && it.Channels.TryGetValue(p.Channel, out var cw))
             {
                 score += 2.5 * Math.Tanh(cw / 3);
-                var (f, t, l) = it.Counts[p.Channel];
-                if (cw > 0) why.Add($"канал «{p.Channel}»: " + string.Join(", ", new[] { l > 0 ? $"👍 {l}" : null, f > 0 ? $"досмотрено {f} из {t}" : $"уже {t} в библиотеке" }.OfType<string>()));
+                var (f, t, l) = it.Counts.GetValueOrDefault(p.Channel);
+                var yt = it.YtSeen.GetValueOrDefault(p.Channel);
+                if (cw > 0) why.Add($"канал «{p.Channel}»: " + string.Join(", ", new[] { l > 0 ? $"👍 {l}" : null,
+                    f > 0 ? $"досмотрено {f} из {t}" : t > 0 ? $"уже {t} в библиотеке" : null, it.Subscribed.Contains(p.Channel) ? "вы подписаны" : null,
+                    yt > 0 ? $"на YouTube смотрели {yt}" : null }.OfType<string>()));
             }
-            else why.Add($"источник «{p.Source}»");
+            else if (p.Score <= 0) why.Add($"источник «{p.Source}»");
             var shared = Words(p.Title).Distinct().Where(it.Words.ContainsKey).ToList();
             var topical = shared.Sum(w => Math.Clamp(it.Words[w], -2, 2));
             score += Math.Clamp(topical, -3, 3);
@@ -261,7 +299,7 @@ public static class Recommend
         var skip = Lib.DoNotDownload();
         skip.UnionWith(Lib.Config.Seen);
         foreach (var r in Downloader.Rows) skip.Add(r.Item.Id);
-        var ranked = Rank(await Task.Run(() => Candidates(c, status), ct), it, skip);
+        var ranked = Rank(await Task.Run(() => Candidates(c, (s, _) => status(s), c.PerSource, c.PerSource), ct), it, skip);
         if (ranked.Count == 0) { status("Новых подходящих видео в источниках нет"); return; }
 
         var sp = m.Space();
@@ -297,7 +335,7 @@ public static class Recommend
     /// The wizard's third step: the best picks that fit each budget (videos / Shorts). Removing one
     /// pulls in the next best that still fits — the list always fills the space you gave it.
     /// </summary>
-    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null)
+    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null, bool fillAll = false)
     {
         readonly List<Pick> _pool = [.. ranked];
         public System.Collections.ObjectModel.ObservableCollection<Pick> Videos { get; } = [];
@@ -311,17 +349,23 @@ public static class Recommend
             // videos added by link go in first, whatever their size; the best of the rest fill what space is left
             foreach (var p in pinned ?? []) (p.Kind == "short" ? Shorts : Videos).Add(p);
             pinned = null;
-            foreach (var shorts in new[] { false, true })
-            {
-                var list = shorts ? Shorts : Videos;
-                var room = (shorts ? ShortBudget : VideoBudget) - Used(shorts);
-                foreach (var p in _pool.Where(p => (p.Kind == "short") == shorts).ToList())
-                {
-                    if (p.Estimate > room) continue;
-                    list.Add(p); _pool.Remove(p); room -= p.Estimate;
-                }
-            }
+            var total = VideoBudget + ShortBudget;
+            Take(false, VideoBudget - Used(false));
+            if (fillAll) Take(false, VideoBudget + ShortBudget / 4 - Used(false));    // a good video just over the line takes a few Shorts' place
+            Take(true, (fillAll ? total - Used(false) : ShortBudget) - Used(true));
+            if (fillAll)                                                               // the rest, too small for any video, gets more Shorts
+                foreach (var shorts in new[] { false, true }) Take(shorts, total - Used(false) - Used(true));
             return this;
+        }
+
+        /// <summary>The best picks of one kind that fit in <paramref name="room"/>, in rank order.</summary>
+        void Take(bool shorts, long room)
+        {
+            foreach (var p in _pool.Where(p => (p.Kind == "short") == shorts).ToList())
+            {
+                if (p.Estimate > room) continue;
+                (shorts ? Shorts : Videos).Add(p); _pool.Remove(p); room -= p.Estimate;
+            }
         }
 
         public void Remove(Pick p) { Videos.Remove(p); Shorts.Remove(p); Fill(); }

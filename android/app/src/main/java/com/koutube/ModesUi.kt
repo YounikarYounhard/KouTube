@@ -120,9 +120,9 @@ fun ConnectScreen(onBack: () -> Unit) {
     }
 }
 
-/** Settings → sharing over Wi-Fi (server role). */
+/** Settings → sharing over Wi-Fi (server role). On the home screen without the device list. */
 @Composable
-fun ShareSection() {
+fun ShareSection(withDevices: Boolean = true) {
     val ctx = LocalContext.current
     val s by Lib.settings.collectAsState()
     val running by Server.running.collectAsState()
@@ -151,7 +151,7 @@ fun ShareSection() {
         Text("Без зрителей раздача выключится сама через 30 минут.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
             modifier = Modifier.padding(top = 4.dp))
     }
-    devices.forEach { (token, name) ->
+    if (withDevices) devices.forEach { (token, name) ->
         ListItem(headlineContent = { Text(name) }, supportingContent = { Text("подключённое устройство") },
             leadingContent = { Icon(Icons.Outlined.Tablet, null) },
             trailingContent = { TextButton({ Server.forget(token) }) { Text("Забыть", color = YtBlue) } })

@@ -112,6 +112,12 @@
             <!-- 1: what to look for -->
             <ScrollViewer x:Name="P1" VerticalScrollBarVisibility="Auto">
                 <StackPanel MaxWidth="940" HorizontalAlignment="Left">
+                    <Border Background="#14FFFFFF" CornerRadius="10" Padding="14,12" Margin="0,0,0,18">
+                        <DockPanel>
+                            <Button x:Name="AccountBtn" DockPanel.Dock="Right" Padding="22,8" Click="OnAccount" VerticalAlignment="Center" />
+                            <TextBlock x:Name="AccountText" TextWrapping="Wrap" FontSize="14" VerticalAlignment="Center" Margin="0,0,14,0" />
+                        </DockPanel>
+                    </Border>
                     <Border x:Name="AgainBox" Background="#14FFFFFF" CornerRadius="10" Padding="14,12" Margin="0,0,0,18" Visibility="Collapsed">
                         <DockPanel>
                             <Button x:Name="AgainBtn" Style="{StaticResource Red}" DockPanel.Dock="Right" Content="Как в прошлый раз" Padding="22,8" Click="OnAgain" VerticalAlignment="Center" />
@@ -180,13 +186,14 @@
                     </StackPanel>
                 </Grid>
                 <TextBlock Text="Ползунок вправо — больше места для Shorts, влево — для обычных видео." Opacity="0.6" Margin="0,8,0,0" />
+                <CheckBox x:Name="FillAll" Content="Заполнить место полностью" FontSize="15" Margin="0,26,0,0" />
+                <TextBlock Text="Видео чуть-чуть не влезает — уступлю ему пару Shorts. Остаток, куда видео уже не помещается, добью Shorts." Opacity="0.6" Margin="26,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
 
             <!-- 3: the picks -->
             <DockPanel x:Name="P3" Visibility="Collapsed">
                 <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-                    <TextBlock x:Name="PickStatus" Opacity="0.75" />
-                    <ProgressBar x:Name="PickProgress" IsIndeterminate="True" Height="3" Margin="0,6,0,0" />
+                    <TextBlock x:Name="PickStatus" Opacity="0.75" TextWrapping="Wrap" />
                 </StackPanel>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel>
@@ -201,6 +208,17 @@
                     </StackPanel>
                 </ScrollViewer>
             </DockPanel>
+
+            <!-- while picking: a big ring with the share of YouTube lists already looked at -->
+            <StackPanel x:Name="PickProgress" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Grid Width="180" Height="180" HorizontalAlignment="Center">
+                    <Ellipse Stroke="#26FFFFFF" StrokeThickness="12" />
+                    <Path x:Name="Ring" Stroke="#FF0033" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                    <TextBlock x:Name="RingText" FontSize="38" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Grid>
+                <TextBlock Text="Подбираем ваши видео" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,22,0,6" />
+                <TextBlock x:Name="RingStatus" Opacity="0.7" HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="600" />
+            </StackPanel>
         </Grid>
     </DockPanel>
 </Window>

@@ -393,6 +393,8 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
                     }
                 }
             }
+            // the phone with the videos: sharing to the tablet right here, not buried in the settings
+            if (filter == "home" && s.role == "server") item(span = { GridItemSpan(maxLineSpan) }) { Column { ShareSection(withDevices = false) } }
             if (filter == "home" && shelf) item(span = { GridItemSpan(maxLineSpan) }) {
                 Column {
                     Text("Продолжить просмотр", Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), style = MaterialTheme.typography.titleMedium)

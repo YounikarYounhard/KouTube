@@ -107,10 +107,12 @@ public partial class MainWindow : Window
 
     async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (Tools.Missing() is { Length: > 0 } miss) Status($"Не найдены: {miss} — положите их в папку tools рядом с программой");
         RefreshStorageUi();
         ShowLibrary();
         UpdatePlan();
+        if (Tools.Missing().Length > 0)
+            try { await Tools.Fetch(Status); Status("yt-dlp, ffmpeg и deno скачаны — всё готово"); }
+            catch (Exception ex) { Status($"Не удалось скачать {Tools.Missing()}: {ex.Message} — проверьте интернет и перезапустите KouTube"); }
         _ = Task.Run(() => { var r = Tools.UpdateYtDlp(); Ui.OnUi(() => ToolsText.Text = "yt-dlp: " + r); });
         await RefreshAll();
         await OfferCleanup();

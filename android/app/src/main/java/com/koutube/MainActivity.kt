@@ -89,6 +89,8 @@ class MainActivity : ComponentActivity() {
                 if (info.isInPictureInPictureMode) Playback.resumedAt.value = null   // its 6-second timer dies with the player screen
                 // tapped "expand" in the small window → back straight into fullscreen
                 if (!info.isInPictureInPictureMode && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) { Playback.minimized.value = false; Playback.expandFull.value = true }
+                // the small window was closed with ✕: the video stops, like YouTube
+                else if (!info.isInPictureInPictureMode && !Playback.sleeping) Playback.player.pause()
             }
         }
         setContent {
@@ -100,11 +102,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() { super.onResume(); Lib.refresh() }
 
-    // Leaving the app is a checkpoint: whatever changed goes to the stick now. Closing the small window
-    // stops the video (like YouTube); with the sleep timer on, sound keeps going with the screen off.
+    // Leaving the app is a checkpoint: whatever changed goes to the stick now. The sound goes on in the
+    // background (another app, screen off) — pause it from the notification or the lock screen.
     override fun onStop() {
         super.onStop()
-        if (!Playback.sleeping && Playback.current.value != null) Playback.player.pause()
         Lib.flushAll()
     }
 

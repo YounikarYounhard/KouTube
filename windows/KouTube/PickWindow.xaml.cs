@@ -26,6 +26,8 @@ public partial class PickWindow : Window
         Target.ItemsSource = Lib.Mounts.Where(x => x.Online).ToList();
         Target.SelectedItem = m;
         Split.Value = m.Storage.Budget.ShortsShare * 100;
+        FillAll.IsChecked = c.FillAll;
+        AccountUi();
         Chips();
         Show(1);
     }
@@ -39,7 +41,7 @@ public partial class PickWindow : Window
         foreach (var (t, i) in new[] { (Step1, 1), (Step2, 2), (Step3, 3) }) t.Opacity = i == step ? 1 : 0.4;
         BackBtn.Visibility = step > 1 ? Visibility.Visible : Visibility.Hidden;
         NextBtn.Content = step < 3 ? "Далее" : "Скачать";
-        NextBtn.IsEnabled = step != 1 || Lib.Config.Sources.Count + Lib.Config.Keywords.Count + Lib.Config.Wanted.Count > 0 || Lib.Videos().Count > 0;
+        NextBtn.IsEnabled = step != 1 || Lib.Config.Sources.Count + Lib.Config.Keywords.Count + Lib.Config.Wanted.Count > 0 || Lib.Videos().Count > 0 || Account.SignedIn;
         if (step == 1) { ImplicitHint(); AgainHint(); }
     }
 
@@ -129,11 +131,26 @@ public partial class PickWindow : Window
         var c = Lib.Config;
         if (c.Sources.Count + c.Keywords.Count > 0 || c.LastPickGb != null) { ImplicitText_Box.Visibility = Visibility.Collapsed; return; }
         var imp = Recommend.Implicit(c, Recommend.Learn(Lib.Videos()));
-        ImplicitText.Text = imp.Sources.Count + imp.Keywords.Count == 0
-            ? "Ничего не выбрано — добавьте хотя бы один канал или слово."
+        ImplicitText.Text = Account.SignedIn ? "Ничего не выбрано — подберу как YouTube на главной: по вашей истории, подпискам, рекомендациям и «Смотреть позже»."
+            : imp.Sources.Count + imp.Keywords.Count == 0 ? "Ничего не выбрано — войдите в YouTube или добавьте хотя бы один канал или слово."
             : "Ничего не выбрано — подберу по вашей библиотеке: " + string.Join(", ", imp.Sources.Select(s => s.Name).Concat(imp.Keywords.Select(k => "«" + k + "»"))) + ".";
         ImplicitText_Box.Visibility = Visibility.Visible;
-        NextBtn.IsEnabled = imp.Sources.Count + imp.Keywords.Count > 0;
+        NextBtn.IsEnabled = Account.SignedIn || imp.Sources.Count + imp.Keywords.Count > 0;
+    }
+
+    void AccountUi()
+    {
+        AccountText.Text = Account.SignedIn
+            ? "YouTube подключён: подборка учитывает вашу историю за последние месяцы, подписки, рекомендации и «Смотреть позже». Видео качаются без аккаунта."
+            : "Войдите в YouTube — подборка станет как ваша главная: по истории просмотров, подпискам, рекомендациям и «Смотреть позже».";
+        AccountBtn.Content = Account.SignedIn ? "Выйти" : "Войти в YouTube";
+    }
+
+    void OnAccount(object sender, RoutedEventArgs e)
+    {
+        if (Account.SignedIn) Account.SignOut(); else Account.SignIn(this);
+        AccountUi();
+        Show(_step);
     }
 
     async void OnFindChannel(object sender, RoutedEventArgs e)
@@ -206,38 +223,61 @@ public partial class PickWindow : Window
 
     // ---------- step 3 ----------
 
+    double _ring;
+
+    /// <summary>The ring: an arc from 12 o'clock, clockwise, <paramref name="f"/> of the way round.</summary>
+    void SetRing(double f)
+    {
+        f = Math.Clamp(f, 0, 0.9999);
+        const double c = 90, r = 84;
+        var a = f * 2 * Math.PI;
+        Ring.Data = new PathGeometry([new PathFigure(new Point(c, c - r),
+            [new ArcSegment(new Point(c + r * Math.Sin(a), c - r * Math.Cos(a)), new Size(r, r), 0, f > 0.5, SweepDirection.Clockwise, true)], false)]);
+        RingText.Text = $"{f * 100:0}%";
+    }
+
     async Task Build()
     {
         Show(3);
         NextBtn.IsEnabled = false;
         PickProgress.Visibility = Visibility.Visible;
         VideoPicks.ItemsSource = null; ShortPicks.ItemsSource = null;
-        VideosHeader.Text = ""; ShortsHeader.Text = "";
-        void St(string s) => Ui.OnUi(() => PickStatus.Text = s);
+        VideosHeader.Text = ""; ShortsHeader.Text = ""; PickStatus.Text = "";
+        _ring = 0;
+        void St(string s, double f) => Ui.OnUi(() => { RingStatus.Text = s; SetRing(_ring = Math.Max(_ring, f)); });
         try
         {
-            var it = Recommend.Learn(Lib.Videos());
+            St(Account.SignedIn ? "Смотрю вашу историю на YouTube…" : "Смотрю вашу библиотеку…", 0.01);
+            var hist = await Task.Run(Account.History);
+            St("Смотрю ваши подписки…", 0.04);
+            var subs = await Task.Run(Account.Subscriptions);
+            var it = Recommend.Learn(Lib.Videos(), hist, subs);
             var c = Recommend.Implicit(Lib.Config, it);
-            var cands = await Task.Run(() => Recommend.Candidates(c, St));
+            var total = (long)(Total.Value * Gb);
+            var shorts = (long)(total * Split.Value / 100);
+            var (depth, shortDepth) = Recommend.Depth(c, it, total - shorts, shorts);
+            var cands = await Task.Run(() => Recommend.Candidates(c, (s, f) => St(s, 0.08 + 0.87 * f), depth, shortDepth));
+            St("Выбираю лучшее…", 0.97);
             var skip = Lib.DoNotDownload();
             skip.UnionWith(Lib.Config.Seen);
+            skip.UnionWith(hist?.Select(h => h.Id) ?? []);         // already watched on YouTube
             foreach (var r in Downloader.Rows) skip.Add(r.Item.Id);
             // links you added: in, unless already downloaded (then they leave the list for good)
             var wanted = Lib.Config.Wanted.Where(w => !skip.Contains(w.Id)).ToList();
             if (wanted.Count != Lib.Config.Wanted.Count) Lib.Update(x => x with { Wanted = Lib.Config.Wanted.Where(w => !Lib.DoNotDownload().Contains(w.Id)).ToList() });
             var ranked = Recommend.Rank(cands, it, skip).Where(p => wanted.All(w => w.Id != p.Id)).ToList();
-            var total = (long)(Total.Value * Gb);
-            var shorts = (long)(total * Split.Value / 100);
             Lib.Update(x => x with { LastPickGb = Total.Value });
-            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList()).Fill();
+            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true).Fill();
             VideoPicks.ItemsSource = _sel.Videos;
             ShortPicks.ItemsSource = _sel.Shorts;
             _sel.Videos.CollectionChanged += (_, _) => Headers();
             _sel.Shorts.CollectionChanged += (_, _) => Headers();
             Headers();
-            St(ranked.Count == 0 ? "Подходящих новых видео не нашлось — добавьте каналы или ключевые слова." : "✕ — убрать видео, на его место встанет следующее. Глаз — уже смотрел, больше не предлагать. Ни то ни другое не портит рекомендации.");
+            PickStatus.Text = (hist == null ? "YouTube не отдал вашу историю — похоже, вход устарел: «Назад» → «Выйти» → «Войти в YouTube». " : "")
+                + (ranked.Count == 0 ? "Подходящих новых видео не нашлось — войдите в YouTube, добавьте каналы или ключевые слова."
+                    : "✕ — убрать видео, на его место встанет следующее. Глаз — уже смотрел, больше не предлагать. Ни то ни другое не портит рекомендации.");
         }
-        catch (Exception ex) { St("Не удалось подобрать: " + ex.Message); }
+        catch (Exception ex) { PickStatus.Text = "Не удалось подобрать: " + ex.Message; }
         finally { PickProgress.Visibility = Visibility.Collapsed; }
     }
 
@@ -279,12 +319,16 @@ public partial class PickWindow : Window
                 break;
             case 2:
                 if (Total.Value <= 0) return;
+                Lib.Update(c => c with { FillAll = FillAll.IsChecked == true });
                 _m.Storage = _m.Storage with { UpdatedAt = Format.Now(), Budget = _m.Storage.Budget with { ShortsShare = Split.Value / 100 } };
                 try { Format.WriteAtomic(Path.Combine(_m.Ml, "storage.json"), Format.Seal(Format.ToJson(_m.Storage))); } catch (IOException) { }
                 await Build();
                 break;
             default:
                 if (_sel == null) return;
+                // links you added are in the queue now: off the list for next time, but remembered as "more like this"
+                var linked = _sel.Videos.Concat(_sel.Shorts).Where(p => p.Source == "ссылка").Select(p => p.Id).ToList();
+                Lib.Update(c => c with { Wanted = c.Wanted.Where(w => !linked.Contains(w.Id)).ToList(), Linked = [.. c.Linked.Union(linked)] });
                 foreach (var p in _sel.Videos.Concat(_sel.Shorts))
                     Downloader.Rows.Add(new QRow(new QueueItem
                     {

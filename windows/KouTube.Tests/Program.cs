@@ -166,6 +166,33 @@ var fx = Path.Combine(dir?.FullName ?? throw new Exception("spec/fixtures not fo
 int failed = 0, passed = 0;
 void Check(bool ok, string what) { if (ok) passed++; else { failed++; Console.WriteLine("FAIL: " + what); } }
 
+// a whole pick on the real YouTube account (its cookies from the real home): history with watch progress,
+// subscriptions, every list, ranking, 12 GB filled — prints what it would download and why
+if (args.Contains("--account"))
+{
+    var real = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KouTube", "youtube", "cookies.txt");
+    File.Copy(real, Path.Combine(Directory.CreateDirectory(Path.Combine(Lib.LocalDir, "youtube")).FullName, "cookies.txt"));
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var hist = Account.History()!;
+    var subs = Account.Subscriptions();
+    Console.WriteLine($"history {hist.Count} (progress known {hist.Count(h => h.Percent != null)}, finished {hist.Count(h => h.Percent >= 90)}), subscriptions {subs.Count} — {sw.Elapsed.TotalSeconds:0}s");
+    var it = Recommend.Learn([], hist, subs);
+    var c = Recommend.Implicit(Lib.Config with { MaxAgeDays = 14 }, it);
+    const long gb = 1L << 30;
+    var (d, sd) = Recommend.Depth(c, it, 10 * gb, 2 * gb);
+    Console.WriteLine($"implicit: {string.Join(", ", c.Sources.Select(s => s.Name))} | {string.Join(", ", c.Keywords)} | depth {d}/{sd}");
+    var cands = Recommend.Candidates(c, (s, f) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, d, sd);
+    var ranked = Recommend.Rank(cands, it, [.. hist.Select(h => h.Id)]);
+    var sel = new Recommend.Selection(ranked, 10 * gb, 2 * gb, null, true).Fill();
+    Console.WriteLine($"candidates {cands.Count}, ranked {ranked.Count}; picked {sel.Videos.Count} videos {Ui.Gb(sel.Used(false))} + {sel.Shorts.Count} Shorts {Ui.Gb(sel.Used(true))} — {sw.Elapsed.TotalSeconds:0}s");
+    foreach (var pk in sel.Videos.Take(12)) Console.WriteLine($"  {pk.Score,5:0.0}  {pk.Title[..Math.Min(60, pk.Title.Length)]}  ← {pk.Reason}");
+    Check(hist.Count(h => h.Percent != null) > hist.Count / 3, "the history knows how much of each video you watched");
+    Check(sel.Used(false) + sel.Used(true) > 11.5 * gb, "12 GB are filled");
+    Console.WriteLine($"{passed} passed, {failed} failed");
+    return failed == 0 ? 0 : 1;
+}
+
+
 // ---------- shared fixtures ----------
 
 foreach (var c in JsonDocument.Parse(File.ReadAllText(Path.Combine(fx, "filekey.json"))).RootElement.GetProperty("cases").EnumerateArray())
@@ -332,6 +359,25 @@ if (src.All(File.Exists))
         var sel = new Recommend.Selection(ranked, big.Estimate + ranked[0].Estimate, 0, [big]).Fill();
         Check(sel.Videos.Count == 2 && sel.Videos[0].Id == "eeeeeeeeeee" && sel.Videos[1].Id == ranked[0].Id,
             "a linked video comes first and the best of the rest fills the space left: " + string.Join(" | ", sel.Videos.Select(v => v.Id)));
+
+        // «Заполнить полностью»: a video just over its share borrows from the Shorts; what no video fits gets more Shorts
+        Pick V(string id, double min) => new(id, "u", id, "C", min * 60, null, "video", 0, "", "s");
+        var pool = new List<Pick> { V("a0000000000", 20), V("b0000000000", 10) };
+        pool.AddRange(Enumerable.Range(0, 60).Select(i => new Pick($"s{i:D10}", "u", "s", "C", 45, null, "short", 0, "", "s")));
+        long vb = pool[0].Estimate + pool[1].Estimate / 2, sb = 40 * pool[2].Estimate;
+        var plain = new Recommend.Selection(pool, vb, sb).Fill();
+        var full = new Recommend.Selection(pool, vb, sb, null, true).Fill();
+        Check(plain.Videos.Count == 1 && plain.Shorts.Count == 40, $"without the box every part keeps its own budget: {plain.Videos.Count} + {plain.Shorts.Count}");
+        Check(full.Videos.Count == 2 && full.Used(false) + full.Used(true) <= vb + sb && full.Used(false) + full.Used(true) > vb + sb - pool[2].Estimate,
+            $"with it the 10-minute video gets in and Shorts fill the rest to the brim: {full.Videos.Count} + {full.Shorts.Count}");
+    }
+
+    // ---------- picking from YouTube (network): a keyword with "only new" finds plenty ----------
+    if (args.Contains("--online") || args.Contains("--picks"))
+    {
+        var kp = Recommend.Candidates(Lib.Config with { Sources = [], Keywords = ["путешествие"], MaxAgeDays = 14 }, (s, _) => { if (s.StartsWith("Не")) Console.WriteLine("  " + s); }, 60, 60);
+        Console.WriteLine($"  «путешествие», только новые: {kp.Count(p => p.Kind == "video")} видео, {kp.Count(p => p.Kind == "short")} Shorts");
+        Check(kp.Count(p => p.Kind == "video") >= 30 && kp.Count(p => p.Kind == "short") >= 20, "a keyword with «only new» finds plenty of videos and #hashtag Shorts");
     }
 
     // ---------- a real download (network) ----------
@@ -340,7 +386,7 @@ if (src.All(File.Exists))
         var found = Recommend.FindChannels("Vert Dider");
         Check(found.Any(f => f.Name == "Vert Dider" && f.Subscribers > 1_000_000), "channel search by name finds Vert Dider");
         Lib.Update(c => c with { Sources = [new Source(found.First(f => f.Name == "Vert Dider").Url, "Vert Dider", "channel")], PerSource = 5, MaxAgeDays = 60 });
-        var picks = Recommend.Candidates(Lib.Config, s => { });
+        var picks = Recommend.Candidates(Lib.Config, (_, _) => { }, 5, 5);
         Console.WriteLine($"  candidates: {picks.Count} ({picks.Count(p => p.Kind == "short")} shorts)");
         Check(picks.Count > 0 && picks.Where(p => p.Published != null).All(p => (DateTimeOffset.UtcNow - p.Published!.Value).TotalDays <= 61), "candidates respect the date window");
         // covers: a frame cut while YouTube was out of reach gives way to YouTube's own big picture

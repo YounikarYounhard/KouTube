@@ -9,5 +9,5 @@
 ## Сборка
 
 - **Android:** `cd android && gradlew assembleDebug` (JDK 17+, Android SDK).
-- **Windows:** .NET 10 SDK, `dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true`. Рядом с программой нужна папка `tools` с `yt-dlp.exe`, `ffmpeg.exe`, `ffprobe.exe` и `deno.exe`.
+- **Windows:** .NET 10 SDK, `dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true`. `yt-dlp.exe`, `ffmpeg.exe`, `ffprobe.exe` и `deno.exe` программа при первом запуске скачает сама — в папку `tools` рядом с собой.
 - **Проверки:** `dotnet run --project windows/KouTube.Tests` и `gradlew testDebugUnitTest`.

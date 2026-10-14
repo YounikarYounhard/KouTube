@@ -1,5 +1,7 @@
 package com.koutube
 
+import android.content.Intent
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -26,6 +28,9 @@ object Playback {
         ExoPlayer.Builder(App.instance, DefaultRenderersFactory(App.instance).setEnableDecoderFallback(true))
             .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000)
             .setHandleAudioBecomingNoisy(true)
+            // a call or another player pauses us; the CPU and Wi-Fi stay awake while sound plays with the screen off
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build().also {
                 it.addListener(listener)
                 // debug builds log decoder choice and dropped frames: `adb logcat -s EventLogger`
@@ -84,6 +89,7 @@ object Playback {
         player.setMediaItems(q.map(::item), i, resumePos(q[i]))
         player.prepare()
         player.play()
+        runCatching { App.instance.startService(Intent(App.instance, PlaybackService::class.java)) }   // notification controls
         ticker?.cancel()
         ticker = main.launch { while (isActive) { delay(1000); tick() } }
     }
@@ -96,6 +102,7 @@ object Playback {
         player.stop()
         player.clearMediaItems()
         queue.value = emptyList()
+        App.instance.stopService(Intent(App.instance, PlaybackService::class.java))
         Lib.flushAll()
     }
 

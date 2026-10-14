@@ -1,7 +1,9 @@
-// yt-dlp, ffmpeg, ffprobe and deno: found in tools\ next to the exe (release zip) or in the repo's
-// tools\ (development). The binaries are never committed.
+// yt-dlp, ffmpeg, ffprobe and deno: found in tools\ next to the exe or in the repo's tools\ (development).
+// The release is a single KouTube.exe — it fetches them on its first start. The binaries are never committed.
 
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 
@@ -24,6 +26,41 @@ public static class Tools
     public static string Missing() => string.Join(", ", new[] { "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe" }
         .Where(f => !File.Exists(Path.Combine(Dir, f))));
 
+    /// <summary>First start of the bare exe: yt-dlp, ffmpeg + ffprobe and deno (~200 MB, once) from their own GitHub releases.</summary>
+    public static async Task Fetch(Action<string> status)
+    {
+        Directory.CreateDirectory(Dir);
+        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+        async Task<string> Get(string url, string name)
+        {
+            var part = Path.Combine(Dir, name + ".part");
+            using var r = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            r.EnsureSuccessStatusCode();
+            var len = r.Content.Headers.ContentLength;
+            await using var src = await r.Content.ReadAsStreamAsync();
+            await using var dst = File.Create(part);
+            var buf = new byte[1 << 20];
+            long got = 0;
+            for (int n; (n = await src.ReadAsync(buf)) > 0;)
+            {
+                await dst.WriteAsync(buf.AsMemory(0, n));
+                if ((got >> 20) != ((got += n) >> 20)) status($"Первый запуск: скачиваю {name} — {got >> 20} МБ" + (len is > 0 ? $" из {len >> 20}" : ""));
+            }
+            return part;
+        }
+        void Unzip(string zip, params string[] names)
+        {
+            using (var z = ZipFile.OpenRead(zip))
+                foreach (var e in z.Entries.Where(e => names.Contains(e.Name))) e.ExtractToFile(Path.Combine(Dir, e.Name), true);
+            File.Delete(zip);
+        }
+        if (!File.Exists(YtDlp)) File.Move(await Get("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", "yt-dlp"), YtDlp, true);
+        if (!File.Exists(FfMpeg) || !File.Exists(FfProbe))
+            Unzip(await Get("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg"), "ffmpeg.exe", "ffprobe.exe");
+        if (!File.Exists(Path.Combine(Dir, "deno.exe")))
+            Unzip(await Get("https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip", "deno"), "deno.exe");
+    }
+
     public static ProcessStartInfo Start(string exe, IEnumerable<string> args)
     {
         var p = new ProcessStartInfo(exe)
@@ -39,19 +76,22 @@ public static class Tools
         return p;
     }
 
-    public static (int Code, string Out, string Err) Run(string exe, IEnumerable<string> args, int timeoutMs = 120_000)
+    public static (int Code, string Out, string Err) Run(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null)
     {
-        using var p = Process.Start(Start(exe, args))!;
+        var si = Start(exe, args);
+        if (cwd != null) si.WorkingDirectory = cwd;
+        using var p = Process.Start(si)!;
         var err = p.StandardError.ReadToEndAsync();
         var o = p.StandardOutput.ReadToEndAsync();
         if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch (Exception) { } }
         return (p.HasExited ? p.ExitCode : -1, o.Result, err.Result);
     }
 
-    public static JsonElement Json(string exe, IEnumerable<string> args, int timeoutMs = 120_000)
+    public static JsonElement Json(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null)
     {
-        var (code, o, e) = Run(exe, args, timeoutMs);
-        if (code != 0 || string.IsNullOrWhiteSpace(o)) throw new IOException(LastLine(e) ?? $"код {code}");
+        var (code, o, e) = Run(exe, args, timeoutMs, cwd);
+        // a yt-dlp list whose later page fails (YouTube answers 500 on hashtag pages) still prints what it got: keep it
+        if (code != 0 && !(exe == YtDlp && o.TrimStart().StartsWith('{')) || string.IsNullOrWhiteSpace(o)) throw new IOException(LastLine(e) ?? $"код {code}");
         return JsonDocument.Parse(o).RootElement.Clone();
     }
 

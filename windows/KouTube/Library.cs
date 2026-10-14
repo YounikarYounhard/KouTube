@@ -86,8 +86,12 @@ public record Config
     public List<string> Seen { get; init; } = [];
     /// <summary>Videos added to «Подборка» by link: in every pick until they are downloaded.</summary>
     public List<Wanted> Wanted { get; init; } = [];
+    /// <summary>IDs once added by link: a strong "more like this" for recommendations after they leave <see cref="Wanted"/>.</summary>
+    public List<string> Linked { get; init; } = [];
     /// <summary>How many GB the last pick filled — for «Как в прошлый раз».</summary>
     public double? LastPickGb { get; init; }
+    /// <summary>«Заполнить место полностью»: videos and Shorts lend each other room so nothing is left empty.</summary>
+    public bool FillAll { get; init; } = true;
 }
 
 public record Wanted(string Id, string Url, string Title, string? Channel, double? DurationSec, string Kind);

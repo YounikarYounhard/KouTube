@@ -1,5 +1,5 @@
-# A tag v* = a release: the Android APK (signed with the KouTube key from the repository secrets) and the
-# Windows zip (KouTube.exe + yt-dlp, ffmpeg, ffprobe, deno in tools\). Tests of both run first.
+# A tag v* = a release: the Android APK (signed with the KouTube key from the repository secrets) and one
+# KouTube.exe for Windows (it fetches yt-dlp, ffmpeg and deno itself on first start). Tests of both run first.
 name: release
 
 on:
@@ -48,24 +48,16 @@ jobs:
           dotnet-version: "10.0.x"
       - name: Tests
         run: dotnet run --project windows/KouTube.Tests
-      - name: Program and its tools
+      - name: KouTube.exe
         shell: pwsh
         run: |
           $v = "${{ github.ref_name }}".TrimStart('v')
-          dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out/KouTube
-          Remove-Item out/KouTube/*.pdb -ErrorAction SilentlyContinue
-          $t = New-Item -ItemType Directory out/KouTube/tools
-          Invoke-WebRequest https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe -OutFile "$t/yt-dlp.exe"
-          Invoke-WebRequest https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile ff.zip
-          Expand-Archive ff.zip ff
-          Copy-Item ff/*/bin/ffmpeg.exe, ff/*/bin/ffprobe.exe $t
-          Invoke-WebRequest https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip -OutFile deno.zip
-          Expand-Archive deno.zip $t
-          Compress-Archive out/KouTube "KouTube-$v-windows.zip"
+          dotnet publish windows/KouTube -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out
+          Move-Item out/KouTube.exe "KouTube-$v.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: KouTube-*-windows.zip
+          path: KouTube-*.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
