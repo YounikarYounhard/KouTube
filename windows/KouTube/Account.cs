@@ -12,9 +12,11 @@ namespace KouTube;
 
 public static class Account
 {
-    static string Dir => Path.Combine(Lib.LocalDir, "youtube");
+    static string Dir => Lib.Config.AccountProfile == "default" ? Path.Combine(Lib.LocalDir, "youtube")
+        : Path.Combine(Lib.LocalDir, "youtube-profiles", (Guid.TryParse(Lib.Config.AccountProfile, out var id) ? id : Guid.Empty).ToString("N"));
     static string CookieFile => Path.Combine(Dir, "cookies.txt");
     public static bool SignedIn => File.Exists(CookieFile);
+    public static bool Enabled => Lib.Config.UseAccount && SignedIn;
     // yt-dlp writes refreshed cookies back into the file: one yt-dlp at a time may use it
     static readonly SemaphoreSlim One = new(1, 1);
 
@@ -99,7 +101,7 @@ public static class Account
     /// </summary>
     public static List<Watched>? History()
     {
-        if (!SignedIn) return [];
+        if (!Enabled) return [];
         try
         {
             var (j, pages) = FeedPages(":ythistory", 800);
@@ -133,7 +135,7 @@ public static class Account
     /// <summary>The channels you are subscribed to — the history feed mostly leaves the channel out, this list has them all.</summary>
     public static List<Channel> Subscriptions()
     {
-        if (!SignedIn) return [];
+        if (!Enabled) return [];
         try
         {
             var j = Feed("https://www.youtube.com/feed/channels", 1000);
@@ -147,7 +149,7 @@ public static class Account
     /// <summary>For a download YouTube refused as "a bot": a copy of the cookies, so yt-dlp's write-back never races the picking.</summary>
     public static string[] CookieArgs()
     {
-        if (!SignedIn) return [];
+        if (!Enabled) return [];
         var copy = Path.Combine(Dir, "download-cookies.txt");
         File.Copy(CookieFile, copy, true);
         return ["--cookies", copy];

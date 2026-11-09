@@ -174,6 +174,7 @@
             </Grid>
             <StackPanel Grid.Column="2" Orientation="Horizontal">
                 <!-- stick back from the phone: clear what was watched, then pick new ones -->
+                <Button Content="Обновить контент" Click="OnRefreshContent" Padding="12,9" Margin="0,0,8,0" />
                 <Button Click="OnCleanWatched" Padding="16,9" Margin="0,0,8,0" ToolTip="Удалить с флешки и телефона то, что уже досмотрено — перед тем как качать новое">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE74D;" FontFamily="{StaticResource Icons}" FontSize="16" VerticalAlignment="Center" />
@@ -203,6 +204,11 @@
             <DockPanel x:Name="PageCards">
                 <StackPanel DockPanel.Dock="Top" Margin="6,0,0,10">
                     <StackPanel x:Name="Chips" Orientation="Horizontal" />
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="←" Click="OnLibraryPrev" ToolTip="Предыдущие видео" />
+                        <TextBlock x:Name="LibraryPage" Margin="12,0" VerticalAlignment="Center" />
+                        <Button Content="→" Click="OnLibraryNext" ToolTip="Следующие видео" />
+                    </StackPanel>
                     <TextBlock x:Name="StorageText" Opacity="0.65" Margin="2,10,0,0" TextWrapping="Wrap" />
                 </StackPanel>
                 <Grid>
@@ -233,6 +239,7 @@
                             <TextBlock x:Name="PlanText" Margin="0,10,0,0" TextWrapping="Wrap" Opacity="0.7" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="20,0,0,0">
+                            <Button Content="Отменить всё" Click="OnCancelAll" Padding="12,7" Margin="0,0,8,0" />
                             <Button x:Name="StopBtn" Content="Пауза" Click="OnStop" IsEnabled="False" Padding="18,7" />
                             <Button x:Name="RetryBtn" Content="Повторить ошибки" Click="OnRetry" Margin="8,0,0,0" Padding="18,7" Visibility="Collapsed" />
                             <Button x:Name="ConfirmBtn" Content="Скачать" Margin="8,0,0,0" Click="OnConfirm" Style="{StaticResource RedButton}" Padding="22,8" />

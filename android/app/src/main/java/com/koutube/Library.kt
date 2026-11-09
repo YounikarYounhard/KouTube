@@ -27,6 +27,9 @@ import java.util.UUID
     val finishPercent: Int = 90,
     val sort: String = "added",            // added | title | channel | watched
     val role: String? = null,              // null = not chosen yet | server (videos here) | client (videos on another phone) | player (just a folder)
+    val autoplay: Boolean = true,
+    val defaultSubtitles: Boolean = true,
+    val showShorts: Boolean = true,
     val shareWifi: Boolean = false,        // server: give the library to tablets over Wi-Fi
 )
 
@@ -69,7 +72,7 @@ private class Mount(val ref: StorageRef) {
     fun remerge(key: String? = null) {
         val all = others + DeviceFile(deviceId = Lib.deviceId, items = mine)
         if (key == null) { merged.clear(); merged.putAll(merge(all)) }
-        else merge(all.map { f -> f.copy(items = f.items.filterKeys { it == key }) })[key]?.let { merged[key] = it }
+        else merge(all.map { f -> f.copy(items = f.items[key]?.let { mapOf(key to it) } ?: emptyMap()) })[key]?.let { merged[key] = it }
     }
 }
 
@@ -89,6 +92,8 @@ object Lib {
     val storages = MutableStateFlow<List<StorageView>>(emptyList())
     val busy = MutableStateFlow(false)
     val notice = MutableStateFlow<String?>(null)
+    val feedVisit = MutableStateFlow(System.nanoTime())
+    fun newFeed() { feedVisit.value = System.nanoTime() }
 
     private val mounts = LinkedHashMap<String, Mount>()
     val isClient get() = settings.value.role == "client"
@@ -277,6 +282,7 @@ object Lib {
         fun walk(dirId: String, path: String, role: String, depth: Int) {
             val docs = m.saf.list(dirId)
             val byName = docs.associateBy { it.name }
+            val subtitleDocs = docs.filter { it.name.endsWith(".vtt") || it.name.endsWith(".srt") }
             for (d in docs) {
                 val rel = if (path == ".") d.name else "$path/${d.name}"
                 if (d.isDir) { if (depth < 2 && !d.name.startsWith(".")) walk(d.id, rel, role, depth + 1); continue }
@@ -286,7 +292,7 @@ object Lib {
                 next[rel] = ScanEntry(d.size, d.mtime, key)
                 if (key in found) continue
                 val base = d.name.substringBeforeLast('.')
-                val subs = docs.filter { it.name.startsWith("$base.") && (it.name.endsWith(".vtt") || it.name.endsWith(".srt")) }.map {
+                val subs = subtitleDocs.filter { it.name.startsWith("$base.") }.map {
                     val lang = it.name.removePrefix("$base.").substringBeforeLast('.')
                     Sub(lang, if (path == ".") it.name else "$path/${it.name}") to it
                 }
@@ -523,7 +529,7 @@ object Lib {
 
     // ---------- server side: what the tablet asks for ----------
 
-    fun snapshot() = RemoteLibrary(deviceName, videos.value.map { RemoteItem(it.key, it.storageId, it.item, it.present) })
+    fun snapshot() = RemoteLibrary(deviceName, videos.value.map { RemoteItem(it.key, it.storageId, it.item.copy(meta = it.meta.copy(path = it.found?.path ?: it.meta.path)), it.present) })
 
     fun fileFor(storageId: String, key: String): Triple<Uri, Long, String>? = runBlocking(io) {
         val m = mounts[storageId] ?: return@runBlocking null

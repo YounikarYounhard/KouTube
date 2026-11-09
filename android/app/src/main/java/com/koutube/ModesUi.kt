@@ -151,10 +151,31 @@ fun ShareSection(withDevices: Boolean = true) {
         Text("Без зрителей раздача выключится сама через 30 минут.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
             modifier = Modifier.padding(top = 4.dp))
     }
+    val access by Server.access.collectAsState()
+    val storages by Lib.storages.collectAsState()
+    var editing by remember { mutableStateOf<String?>(null) }
     if (withDevices) devices.forEach { (token, name) ->
-        ListItem(headlineContent = { Text(name) }, supportingContent = { Text("подключённое устройство") },
+        ListItem(headlineContent = { Text(name) }, supportingContent = { Text("Доступных папок: ${access[token].orEmpty().size}") },
             leadingContent = { Icon(Icons.Outlined.Tablet, null) },
-            trailingContent = { TextButton({ Server.forget(token) }) { Text("Забыть", color = YtBlue) } })
+            trailingContent = { Row { TextButton({ editing = token }) { Text("Папки", color = YtBlue) }; TextButton({ Server.forget(token) }) { Text("Забыть", color = YtBlue) } } })
+    }
+    if (withDevices) Text("Новое устройство не видит файлы, пока вы не выберете папки. Доступ запоминается; клиент не может удалять файлы сервера.", Modifier.padding(16.dp), fontSize = 13.sp)
+    editing?.let { token ->
+        AlertDialog(onDismissRequest = { editing = null }, title = { Text("Папки для ${devices[token].orEmpty()}") }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                storages.forEach { storage ->
+                    Text(storage.name, fontWeight = FontWeight.Bold)
+                    storage.folders.forEach { folder ->
+                        val grant = ShareFolder(storage.id, folder.path)
+                        val selected = grant in access[token].orEmpty()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(selected, { on -> Server.setAccess(token, if (on) Server.grants(token) + grant else Server.grants(token) - grant) })
+                            Text(if (folder.path == ".") "Все вложенные папки" else folder.path)
+                        }
+                    }
+                }
+            }
+        }, confirmButton = { TextButton({ editing = null }) { Text("Готово") } })
     }
 }
 
@@ -166,6 +187,6 @@ fun ClientSection() {
     ListItem(headlineContent = { Text(c.name) }, supportingContent = { Text("${c.host}:${c.port}") },
         leadingContent = { Icon(Icons.Outlined.PhoneAndroid, null) },
         trailingContent = { TextButton({ Remote.disconnect(); Lib.refresh(force = true) }) { Text("Отключиться", color = YtBlue) } })
-    Text("Автоудаление и папки настраиваются на телефоне-сервере.", Modifier.padding(horizontal = 16.dp),
+    Text("Доступ к папкам настраивается на телефоне-сервере. После изменения обновите библиотеку.", Modifier.padding(horizontal = 16.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
 }

@@ -487,6 +487,7 @@ private fun PlayerSettings(fullscreen: Boolean, onDismiss: () -> Unit, onLock: (
                     if (audios.isNotEmpty()) SheetRow(Icons.Outlined.RecordVoiceOver, "Звуковая дорожка",
                         audios.firstOrNull { it.isSelected }?.mediaTrackGroup?.getFormat(0)?.let { it.label ?: it.language?.let(::langName) } ?: "Оригинальная",
                         arrow = audios.size > 1) { if (audios.size > 1) page = "audio" }
+                    SheetRow(Icons.Rounded.Refresh, "Восстановить синхронизацию", "Без перезапуска приложения", arrow = false) { Playback.repairSync(); onDismiss() }
                     SheetRow(Icons.Outlined.Settings, "Ещё", "") { page = "more" }
                     SheetRow(Icons.Outlined.Lock, "Блокировка экрана", "", arrow = false) { onLock() }
                 }

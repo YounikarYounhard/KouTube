@@ -5,7 +5,7 @@
     <DockPanel Margin="28,20,28,18">
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
             <TextBlock x:Name="Header" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap" />
-            <TextBlock Text="Их можно убрать и закачать на освободившееся место новые. Снимите галочку с того, что хотите оставить. Карточки и история останутся."
+            <TextBlock x:Name="Hint" Text="Их можно убрать и закачать на освободившееся место новые. Снимите галочку с того, что хотите оставить. Карточки и история останутся."
                        Opacity="0.7" Margin="0,6,0,0" TextWrapping="Wrap" />
         </StackPanel>
         <DockPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
@@ -26,9 +26,9 @@
                 </Button>
             </StackPanel>
         </DockPanel>
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
-            <ItemsControl x:Name="List">
-                <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            <ItemsControl x:Name="List" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                <ItemsControl.Template><ControlTemplate TargetType="ItemsControl"><ScrollViewer VerticalScrollBarVisibility="Auto" CanContentScroll="True"><ItemsPresenter /></ScrollViewer></ControlTemplate></ItemsControl.Template>
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <StackPanel Width="210" Margin="0,0,14,16">
@@ -48,6 +48,6 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-        </ScrollViewer>
+
     </DockPanel>
 </Window>

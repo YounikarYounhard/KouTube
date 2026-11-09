@@ -27,7 +27,10 @@ object Remote {
     val conn = MutableStateFlow(runCatching { json.decodeFromString<Conn>(prefs.getString("conn", "")!!) }.getOrNull())
     val spotted = MutableStateFlow<List<Spotted>>(emptyList())
     private var discovery: NsdManager.DiscoveryListener? = null
-    private val pending = LinkedHashMap<String, RemoteEdit>()
+    private val pending = runCatching { json.decodeFromString<Map<String, RemoteEdit>>(prefs.getString("pending", "{}")!!) }
+        .getOrDefault(emptyMap()).toMutableMap()
+    private val sending = kotlinx.coroutines.sync.Mutex()
+    private fun savePending() { prefs.edit().putString("pending", json.encodeToString(pending.toMap())).apply() }
 
     private fun c() = conn.value ?: error("нет подключения")
 
@@ -62,9 +65,13 @@ object Remote {
     private fun http(url: String, method: String = "GET", body: String? = null): Pair<Int, ByteArray> {
         val h = URL(url).openConnection() as HttpURLConnection
         h.connectTimeout = 5000; h.readTimeout = 20_000; h.requestMethod = method
-        conn.value?.let { h.setRequestProperty("X-KouTube-Token", it.token) }
+        h.setRequestProperty("Accept-Encoding", "gzip")
+        conn.value?.takeIf { url.startsWith(base(it) + "/api/") }?.let { h.setRequestProperty("X-KouTube-Token", it.token) }
         if (body != null) { h.doOutput = true; h.setRequestProperty("Content-Type", "application/json"); h.outputStream.use { it.write(body.toByteArray()) } }
-        return try { h.responseCode to (if (h.responseCode in 200..299) h.inputStream.use { it.readBytes() } else ByteArray(0)) } finally { h.disconnect() }
+        return try { h.responseCode to (if (h.responseCode in 200..299) {
+            val input = if (h.contentEncoding == "gzip") java.util.zip.GZIPInputStream(h.inputStream) else h.inputStream
+            input.use { it.readBytes() }
+        } else ByteArray(0)) } finally { h.disconnect() }
     }
 
     fun get(url: String) = http(url)
@@ -76,6 +83,8 @@ object Remote {
             val (st, b) = http("http://$host:$port/pair", "POST", json.encodeToString(PairRequest(code.trim(), Lib.deviceId, Lib.deviceName)))
             when (st) {
                 200 -> json.decodeFromString<PairReply>(String(b)).let { r ->
+                    if (conn.value?.let { it.host == host && it.port == port } != true)
+                        synchronized(this@Remote) { pending.clear(); savePending() }
                     conn.value = Conn(r.serverName, host, port, r.token)
                     prefs.edit().putString("conn", json.encodeToString(conn.value)).apply()
                     null
@@ -87,7 +96,7 @@ object Remote {
         }.getOrElse { "Не удалось связаться с $host:$port — телефон в той же сети Wi-Fi, раздача включена?" }
     }
 
-    fun disconnect() { conn.value = null; prefs.edit().remove("conn").apply() }
+    @Synchronized fun disconnect() { conn.value = null; pending.clear(); prefs.edit().remove("conn").remove("pending").apply() }
 
     /** The phone's library, or an error text. 401 = the phone forgot this tablet. */
     suspend fun library(): Result<RemoteLibrary> = withContext(Dispatchers.IO) {
@@ -105,14 +114,31 @@ object Remote {
     @Synchronized fun edit(e: RemoteEdit) {
         val k = e.storageId + "/" + e.key
         val old = pending[k]
-        pending[k] = if (old == null) e else old.copy(watch = e.watch ?: old.watch, flags = e.flags ?: old.flags, delete = e.delete || old.delete)
+        pending[k] = mergeRemoteEdit(old, e)
+        savePending()
     }
 
     suspend fun flush() = withContext(Dispatchers.IO) {
-        val todo = synchronized(this@Remote) { pending.values.toList().also { pending.clear() } }
-        for (e in todo) {
-            val ok = runCatching { http("${base()}/api/edit", "POST", json.encodeToString(e)).first == 200 }.getOrDefault(false)
-            if (!ok) edit(e)        // keep it for the next try
+        sending.lock()
+        try {
+            val connection = conn.value ?: return@withContext
+            val todo = synchronized(this@Remote) { pending.values.toList() }
+            for (batch in todo.chunked(100)) {
+                if (conn.value != connection) break
+                val code = runCatching { http("${base(connection)}/api/edits", "POST", json.encodeToString(batch)).first }.getOrDefault(0)
+                val accepted = if (code == 200) batch else if (code == 404 || code == 403) batch.filter { e ->
+                    runCatching { http("${base(connection)}/api/edit", "POST", json.encodeToString(e)).first in listOf(200, 403) }.getOrDefault(false)
+                } else emptyList()
+                synchronized(this@Remote) {
+                    if (conn.value == connection) {
+                        accepted.forEach { e -> val key = e.storageId + "/" + e.key; if (pending[key] == e) pending.remove(key) }
+                        savePending()
+                    }
+                }
+                if (accepted.isEmpty()) break
+            }
+        } finally {
+            sending.unlock()
         }
     }
 

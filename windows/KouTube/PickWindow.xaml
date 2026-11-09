@@ -118,6 +118,12 @@
                             <TextBlock x:Name="AccountText" TextWrapping="Wrap" FontSize="14" VerticalAlignment="Center" Margin="0,0,14,0" />
                         </DockPanel>
                     </Border>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                        <ComboBox x:Name="Profiles" Width="180" SelectionChanged="OnProfile" />
+                        <Button Content="Добавить аккаунт" Click="OnAddProfile" Margin="8,0" />
+                        <CheckBox x:Name="UseAccount" Content="Использовать аккаунт" Click="OnUseAccount" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock Text="Без аккаунта: поиск только по указанным словам, каналам и ссылкам." TextWrapping="Wrap" Margin="0,0,0,12" />
                     <CheckBox x:Name="WatchLater" Content="Брать видео и из «Смотреть позже»" FontSize="14" Margin="0,-6,0,18" Click="OnWatchLater"
                               ToolTip="Обычно выключено: туда часто складывают то, что давно посмотрели" />
                     <Border x:Name="AgainBox" Background="#14FFFFFF" CornerRadius="10" Padding="14,12" Margin="0,0,0,18" Visibility="Collapsed">
@@ -129,6 +135,10 @@
                     <Border x:Name="ImplicitText_Box" Background="#14FFFFFF" CornerRadius="10" Padding="14,10" Margin="0,0,0,18">
                         <TextBlock x:Name="ImplicitText" TextWrapping="Wrap" FontSize="14" />
                     </Border>
+                    <TextBlock Text="Опишите, что хотите посмотреть" FontSize="22" />
+                    <TextBox x:Name="IntentBox" AcceptsReturn="True" Height="70" TextWrapping="Wrap" Margin="0,8" />
+                    <Button Content="Разобрать на темы" Click="OnIntent" HorizontalAlignment="Left" />
+                    <TextBlock Text="Например: для мамы про кухню, путешествия и сад. Локальный разбор выделит темы; проверьте и поправьте слова ниже. Это не нейросеть." TextWrapping="Wrap" Opacity="0.7" Margin="0,6,0,20" />
                     <TextBlock Text="Каналы" FontSize="22" FontWeight="SemiBold" />
                     <TextBlock Text="Новые видео этих каналов попадут в подборку. Напишите имя канала, @handle или вставьте ссылку на канал — он запомнится." Opacity="0.7" Margin="0,4,0,8" TextWrapping="Wrap" />
                     <WrapPanel x:Name="ChannelChips" />
@@ -165,6 +175,13 @@
                         <Button Content="Добавить" Margin="8,0,0,0" Click="OnAddExclude" />
                     </StackPanel>
 
+                    <TextBlock Text="Длительность обычных видео" FontSize="22" Margin="0,20,0,8" />
+                    <ComboBox x:Name="DurationMode" SelectedValuePath="Tag" SelectionChanged="OnDuration" Width="320" HorizontalAlignment="Left">
+                        <ComboBoxItem Tag="long">Больше длинных — около часа</ComboBoxItem>
+                        <ComboBoxItem Tag="medium">Средние — около 20 минут</ComboBoxItem>
+                        <ComboBoxItem Tag="short">Больше коротких — около 6 минут</ComboBoxItem>
+                        <ComboBoxItem Tag="auto">Автоматически — по просмотрам</ComboBoxItem>
+                    </ComboBox>
                     <TextBlock Text="Насколько свежие" FontSize="22" FontWeight="SemiBold" Margin="0,26,0,8" />
                     <RadioButton x:Name="AgeAny" Content="Любые" GroupName="age" Margin="0,3" />
                     <RadioButton x:Name="AgeNew" Content="Только новые — за последние 2 недели" GroupName="age" Margin="0,3" />
@@ -197,12 +214,15 @@
                 </Grid>
                 <TextBlock Text="Ползунок вправо — больше места для Shorts, влево — для обычных видео." Opacity="0.6" Margin="0,8,0,0" />
                 <CheckBox x:Name="FillAll" Content="Заполнить место полностью" FontSize="15" Margin="0,26,0,0" />
-                <TextBlock Text="Видео чуть-чуть не влезает — уступлю ему пару Shorts. Остаток, куда видео уже не помещается, добью Shorts." Opacity="0.6" Margin="26,4,0,0" TextWrapping="Wrap" />
+                <TextBlock Text="Видео чуть-чуть не влезает — уступлю ему пару Shorts. Остаток заполнится только разрешённым типом. Доля 0% полностью исключает этот тип." Opacity="0.6" Margin="26,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
 
             <!-- 3: the picks -->
             <DockPanel x:Name="P3" Visibility="Collapsed">
                 <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Content="←" Click="OnPickPrev" /><TextBlock x:Name="PickPage" Margin="12,0" VerticalAlignment="Center" /><Button Content="→" Click="OnPickNext" />
+                    </StackPanel>
                     <TextBlock x:Name="PickStatus" Opacity="0.75" TextWrapping="Wrap" />
                 </StackPanel>
                 <ScrollViewer VerticalScrollBarVisibility="Auto">

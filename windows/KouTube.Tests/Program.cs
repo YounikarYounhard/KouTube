@@ -26,11 +26,16 @@ if (args is ["--enrich", var root, ..])
 }
 
 // pictures of the PC windows, drawn off-screen (nothing appears on the user's desktop) — the phone's test library as content
-if (args is ["--shots", var shotDir, ..])
+if (args is [var shotMode, var shotDir, ..] && shotMode is "--shots" or "--ui-smoke")
 {
     Directory.CreateDirectory(shotDir);
-    var lib = Mtp.Find().FirstOrDefault(l => l.Path.EndsWith("KouTubeStick"));
+    var lib = shotMode == "--shots" ? Mtp.Find().FirstOrDefault(l => l.Path.EndsWith("KouTubeStick")) : null;
     if (lib != null) { var pm = Lib.AddPhone(lib); Lib.Refresh(pm); }
+    if (shotMode == "--ui-smoke")
+    {
+        Lib.Update(c => c with { UseAccount = false });
+        Lib.Add(Directory.CreateDirectory(Path.Combine(home, "ui-library")).FullName, [new Folder(".")]);
+    }
     Recommend.Calibrate(Lib.Videos());
     Exception? fail = null;
     var ui = new Thread(() =>
@@ -75,6 +80,20 @@ if (args is ["--shots", var shotDir, ..])
             Hide(mw);
             mw.Show();
             Pump(8);                                   // its refresh, covers and channel pictures
+            if (shotMode == "--ui-smoke")
+            {
+                var m = Lib.Mounts.First();
+                for (var i = 0; i < 2000; i++)
+                {
+                    var id = "demo" + i;
+                    m.Mine[id] = new Item { Meta = new Meta { Title = "Путешествия и открытия — выпуск " + i, Channel = "Тестовый канал " + i % 20, Kind = i % 3 == 0 ? "short" : "video", Path = id + ".mp4" } };
+                    m.Docs[id] = new Found(Path.Combine(m.Ref.Root, id + ".mp4"), id + ".mp4", 1024, DateTime.UtcNow, [], null);
+                    Downloader.Rows.Add(new QRow(new QueueItem { Id = id, Title = "Видео " + i, StorageId = m.Ref.StorageId }));
+                }
+                m.Remerge();
+                typeof(MainWindow).GetMethod("ShowLibrary", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(mw, null);
+                if (((System.Windows.Controls.ListBox)mw.FindName("Cards")).Items.Count > 60) throw new Exception("Unbounded library cards");
+            }
             var nav = (System.Windows.Controls.ListBox)mw.FindName("Nav");
             foreach (var (i, n) in new[] { (0, "main"), (1, "shorts"), (2, "history"), (3, "downloads"), (4, "settings") }) { nav.SelectedIndex = i; Pump(1); Save(mw, n + ".png"); }
             var pw = new PickWindow(Lib.Mounts.First());
@@ -82,6 +101,9 @@ if (args is ["--shots", var shotDir, ..])
             pw.Show();
             Pump(2);
             Save(pw, "pick1.png");
+            ((System.Windows.Controls.Button)pw.FindName("NextBtn")).RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Pump(1); Save(pw, "pick2.png");
+            Console.WriteLine("working set MB: " + System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024));
             pw.Close(); mw.Close();
             app.Shutdown();
         }
@@ -290,6 +312,8 @@ Check(Format.ParseName("Utopia Show - ЧТО БУДЕТ ПОСЛЕ？.webm") == 
 Check(Format.DetectKind("auto", null, 720, 1280, 50_000) == "short", "kind short");
 Check(Format.DetectKind("auto", null, 720, 1280, 600_000) == "video", "kind long portrait");
 Check(!Format.IsVideoName("a.webm.part") && Format.IsVideoName("a.WEBM"), "video names");
+Regression.Run(Check);
+
 Check(FormatChoice.Test() is null, "format choice: " + FormatChoice.Test());
 
 // ---------- the library on real files (copies; the originals are only read) ----------

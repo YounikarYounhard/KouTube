@@ -26,6 +26,7 @@ public record QueueItem
     public long Bytes { get; init; }
     public bool Approx { get; init; }
     public double SbCutSec { get; init; }
+    public bool WithAds { get; init; }
     public bool? SbMarked { get; init; }
     public string? StorageId { get; init; }
     public bool Include { get; init; } = true;
@@ -110,7 +111,7 @@ public sealed class QRow(QueueItem item) : INotifyPropertyChanged
     public string Size => _item.Bytes <= 0 ? "размер узнаю при загрузке"
         : _item.SbCutSec > 1 && _item.Expected < _item.Bytes ? $"{(_item.Approx ? "≈ " : "")}{Ui.Gb(_item.Bytes)} → ≈ {Ui.Gb(_item.Expected)} без рекламы"
         : (_item.Approx ? "≈ " : "") + Ui.Gb(_item.Expected);
-    public string Sb => _item.SbMarked switch { true => "реклама: вырежу " + TimeSpan.FromSeconds(_item.SbCutSec).ToString(@"m\:ss"), false => "рекламу никто не разметил", _ => "" };
+    public string Sb => _item.WithAds ? "сохранено без вырезания рекламы" : _item.SbMarked switch { true => "реклама: вырежу " + TimeSpan.FromSeconds(_item.SbCutSec).ToString(@"m\:ss"), false => "рекламу никто не разметил", _ => "" };
     public string Why => string.Join(" · ", new[] { _item.Source, _item.Reason }.Where(s => !string.IsNullOrEmpty(s)));
     public string? Thumb => _item.ThumbUrl;
     System.Windows.Media.Imaging.BitmapImage? _pic;
@@ -139,6 +140,8 @@ public static class Downloader
     public static void Changed() { Save(); OnChanged?.Invoke(); }
 
     static Process? _proc;
+    static readonly SemaphoreSlim StorageWriter = new(1, 1);
+    static bool _cancelAll;
     static CancellationTokenSource? _cts;
     public static bool Running => _cts != null;
 
@@ -194,9 +197,9 @@ public static class Downloader
     }
 
     /// <summary>Full info for one video: formats with sizes, our pick, the alternatives and the SponsorBlock cut.</summary>
-    public static async Task<QueueItem> Probe(string url, string kind, string? source, string? reason, string storageId, bool account = false)
+    public static async Task<QueueItem> Probe(string url, string kind, string? source, string? reason, string storageId, bool account = false, CancellationToken ct = default)
     {
-        var j = await Task.Run(() => Tools.Json(Tools.YtDlp, [.. account ? Account.CookieArgs() : [], "-J", "--no-playlist", "--no-warnings", url], 180_000));
+        var j = await Task.Run(() => Tools.Json(Tools.YtDlp, [.. account ? Account.CookieArgs() : [], "-J", "--no-playlist", "--no-warnings", url], 180_000, ct: ct), ct);
         string? S(string n) => j.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         var id = S("id")!;
         var sec = j.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0;
@@ -205,7 +208,8 @@ public static class Downloader
         var h = j.TryGetProperty("height", out var hh) && hh.ValueKind == JsonValueKind.Number ? hh.GetInt32() : (int?)null;
         var isShort = kind == "short" || S("media_type") == "short" || url.Contains("/shorts/") || (h > w && sec <= 180);
         var pick = FormatChoice.Pick(fs, ProfileForDevices(), sec);
-        var (cut, marked) = await SponsorBlock(id);
+        var (cut, marked) = isShort ? (0d, (bool?)null) : await SponsorBlock(id, ct);
+        ct.ThrowIfCancellationRequested();
         var date = S("upload_date");
         return new QueueItem
         {
@@ -232,16 +236,16 @@ public static class Downloader
         string Mime(string fam) => fam switch { "av01" => "video/av01", "vp09" => "video/x-vnd.on2.vp9", "avc1" => "video/avc", "hevc" => "video/hevc", _ => "" };
         var ok = p.Codecs.Where(c => devs.All(d => d.Caps!.Video.Any(v => v.Mime == Mime(c) && v.MaxW >= 1280))).ToList();
         var slow = ok.Where(c => devs.Any(d => !d.Caps!.Video.Any(v => v.Mime == Mime(c) && v.Hw))).ToList();
-        return ok.Count > 0 ? p with { Codecs = ok, SlowCodecs = slow } : p;
+        return ok.Count > 0 ? p with { Codecs = ok.OrderBy(c => slow.Contains(c)).ToList(), SlowCodecs = slow } : p;
     }
 
     /// <summary>Seconds SponsorBlock will cut with the profile's categories; marked=false when nobody tagged the video.</summary>
-    static async Task<(double Cut, bool? Marked)> SponsorBlock(string id)
+    static async Task<(double Cut, bool? Marked)> SponsorBlock(string id, CancellationToken ct = default)
     {
         try
         {
             var cats = JsonSerializer.Serialize(Lib.Config.SponsorRemove);
-            var r = await Http.GetAsync($"https://sponsor.ajay.app/api/skipSegments?videoID={id}&categories={Uri.EscapeDataString(cats)}");
+            var r = await Http.GetAsync($"https://sponsor.ajay.app/api/skipSegments?videoID={id}&categories={Uri.EscapeDataString(cats)}", ct);
             if (r.StatusCode == System.Net.HttpStatusCode.NotFound) return (0, false);
             if (!r.IsSuccessStatusCode) return (0, null);
             var a = JsonDocument.Parse(await r.Content.ReadAsStringAsync()).RootElement;
@@ -270,6 +274,11 @@ public static class Downloader
         var msg = $"Очередь {mine.Count} шт., ≈ {Ui.Gb(q)} · свободно {Ui.Gb(free)} из {Ui.Gb(total)} · останется {Ui.Gb(after)} · резерв {Ui.Gb(b.ReserveBytes)}";
         if (after < b.ReserveBytes) return new(free, total, q, after, b.ReserveBytes, false, msg + " — не хватает места: уберите часть очереди или выберите профиль меньше");
         var allowance = b.TotalBytes ?? (m.UsedBy(false) + m.UsedBy(true) + free - b.ReserveBytes);
+        if (Lib.Config.FillAll)
+        {
+            if (m.UsedBy(false) + m.UsedBy(true) + q > allowance) return new(free, total, q, after, b.ReserveBytes, false, msg + " — превышен общий лимит носителя");
+            return new(free, total, q, after, b.ReserveBytes, true, msg);
+        }
         foreach (var shorts in new[] { false, true })
         {
             var limit = (long)(allowance * (shorts ? b.ShortsShare : 1 - b.ShortsShare));
@@ -284,9 +293,19 @@ public static class Downloader
 
     public static void Stop() { _cts?.Cancel(); try { _proc?.Kill(true); } catch (Exception) { } }
 
+    public static void CancelAll()
+    {
+        _cancelAll = Running;
+        Stop();
+        foreach (var row in Rows.Where(r => r.Item.Status != Q.Done))
+            row.Item = row.Item with { Include = false, Status = Q.Pending };
+        Changed();
+    }
+
     public static async Task Run(Action<string> status)
     {
-        if (_cts != null || !await Tools.Wait(status)) return;
+        if (_cts != null || !await Tools.Wait(status) || _cts != null) return;
+        _cancelAll = false;
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
         // null = done, or not worth another try; otherwise yt-dlp's raw error
@@ -300,12 +319,23 @@ public static class Downloader
                 {
                     Set(row, Q.Working, "выбираю формат…");
                     var it = row.Item;
-                    var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!, account);
+                    var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!, account, token);
+                    token.ThrowIfCancellationRequested();
                     Ui.OnUi(() => row.Item = q with { Include = true, Status = q.Status == Q.Failed ? Q.Failed : Q.Pending });
                     if (q.Status == Q.Failed) return null;
                 }
                 if (!Check(m).Ok) { Set(row, Q.Failed, "нет места — резерв нарушился бы"); return null; }
-                Set(row, Q.Done, await One(row, m, token, account) ?? "");
+                string? note;
+                try { note = await One(row, m, token, account); }
+                catch (SponsorCutException) when (!row.Item.WithAds)
+                {
+                    token.ThrowIfCancellationRequested();
+                    Ui.OnUi(() => row.Item = row.Item with { WithAds = true, SbCutSec = 0, SbMarked = null, Status = Q.Pending });
+                    Changed();
+                    if (!Check(m).Ok) throw new IOException("Для полной версии с рекламой не хватает места");
+                    note = await One(row, m, token, account);
+                }
+                Set(row, Q.Done, row.Item.WithAds ? "Сохранено с рекламой: вырезать сегменты не удалось. " + note : note ?? "");
                 return null;
             }
             catch (OperationCanceledException) { Set(row, Q.Pending, "остановлено — продолжится с того же места"); return null; }
@@ -346,12 +376,17 @@ public static class Downloader
                 {
                     if (token.IsCancellationRequested) break;
                     Set(row, Q.Pending, "вторая попытка…");
-                    if (await Go(row, Bot(err) && Account.SignedIn) != null)
+                    if (await Go(row, Bot(err) && Account.Enabled) != null)
                         Ui.OnUi(() => row.Progress += " Вторая попытка тоже не удалась — нажмите «Повторить ошибки» позже.");
                 }
             }
         }
-        finally { _cts = null; _proc = null; Changed(); }
+        finally
+        {
+            _cts.Dispose(); _cts = null; _proc = null;
+            if (_cancelAll) { foreach (var row in Rows.Where(r => r.Item.Status != Q.Done).ToList()) Rows.Remove(row); }
+            _cancelAll = false; Changed();
+        }
     }
 
     static void Set(QRow r, string status, string progress) => Ui.OnUi(() => { r.Item = r.Item with { Status = status }; r.Progress = progress; Changed(); });
@@ -359,7 +394,7 @@ public static class Downloader
     static async Task<string?> One(QRow row, Mount m, CancellationToken ct, bool account = false)
     {
         var it = row.Item;
-        var tmp = Directory.CreateDirectory(Path.Combine(Lib.TempDir, it.Id)).FullName;
+        var tmp = Directory.CreateDirectory(Path.Combine(Lib.TempDir, it.Id + (it.WithAds ? "-uncut" : ""))).FullName;
         var c = Lib.Config;
         var args = new List<string>
         {
@@ -374,18 +409,20 @@ public static class Downloader
         // a Short is a minute of video: subtitles (2 s of waiting each), comments and SponsorBlock cost it more time than the video itself
         if (it.Kind != "short")
         {
-            args.AddRange(["--write-subs", "--sub-langs", string.Join(",", c.SubLangs) + ",-live_chat", "--convert-subs", "vtt", "--sleep-subtitles", "2",
-                "--sponsorblock-mark", "all"]);
+            args.AddRange(["--write-subs", "--sub-langs", string.Join(",", c.SubLangs) + ",-live_chat", "--convert-subs", "vtt", "--sleep-subtitles", "2"]);
+            if (!it.WithAds) args.AddRange(["--sponsorblock-mark", "all"]);
             if (c.AutoSubs) args.Add("--write-auto-subs");
             args.AddRange(Lib.CommentArgs());
-            if (c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
+            if (!it.WithAds && c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
         }
-        if (c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
+        if (!it.WithAds && c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
         if (account) args.AddRange(Account.CookieArgs());
         args.Add(it.Url);
 
+        ct.ThrowIfCancellationRequested();
         Set(row, Q.Working, "запуск…");
         string? file = null, note = null;
+        var cutting = false;
         var log = new List<string>();
         long streamsDone = 0, lastTotal = 0, lastDone = 0;
         var err = new List<string>();
@@ -394,11 +431,12 @@ public static class Downloader
         {
             _proc = p;
             using var reg = ct.Register(() => { try { p.Kill(true); } catch (Exception) { } });
-            var errTask = Task.Run(async () => { string? l; while ((l = await p.StandardError.ReadLineAsync()) != null) lock (err) err.Add(l); });
+            var errTask = Task.Run(async () => { string? l; while ((l = await p.StandardError.ReadLineAsync()) != null) lock (err) { if (err.Count == 2000) err.RemoveAt(0); err.Add(l); } });
             string? line;
             while ((line = await p.StandardOutput.ReadLineAsync()) != null)
             {
-                lock (log) log.Add(line);
+                if (line.Contains("[ModifyChapters]")) cutting = true;
+                lock (log) { if (log.Count == 2000) log.RemoveAt(0); log.Add(line); }
                 if (line.StartsWith("KTFILE ")) file = line["KTFILE ".Length..].Trim();
                 else if (line.StartsWith("KT "))
                 {
@@ -425,7 +463,12 @@ public static class Downloader
             if (file == null || !File.Exists(file))
                 file = Directory.EnumerateFiles(tmp).Where(f => Format.IsVideoName(Path.GetFileName(f)))
                     .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-            if (serious.Count > 0) throw new IOException(Human(Tools.LastLine(string.Join("\n", serious))!));
+            if (serious.Count > 0)
+            {
+                var raw = Tools.LastLine(string.Join("\n", serious))!;
+                if (!it.WithAds && it.Kind != "short" && c.SponsorRemove.Count > 0 && IsSponsorFailure(raw, cutting)) throw new SponsorCutException(raw);
+                throw new IOException(raw);
+            }
             if (file == null) throw new IOException("yt-dlp ничего не скачал. Подробности — в журнале: " + LogPath(it.Id));
             if (errors.Count > 0) note = "часть субтитров не скачалась — YouTube ограничил запросы";
         }
@@ -433,15 +476,22 @@ public static class Downloader
         // check before it goes anywhere near the library
         Set(row, Q.Checking, "");
         Ui.OnUi(() => row.SetStage("проверяю файл…", 95));
-        var pr = Tools.Json(Tools.FfProbe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file]);
+        var pr = await Task.Run(() => Tools.Json(Tools.FfProbe, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], ct: ct), ct);
         var streams = pr.GetProperty("streams").EnumerateArray().Select(s => s.GetProperty("codec_type").GetString()).ToList();
         var dur = double.Parse(pr.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
         if (!streams.Contains("video") || !streams.Contains("audio")) throw new IOException("в файле нет видео или звука");
         if (it.DurationSec > 0 && dur < (it.DurationSec - it.SbCutSec) * 0.9)
             throw new IOException($"длительность {dur:0} с вместо ≈{it.DurationSec - it.SbCutSec:0} с — файл недокачан или повреждён");
-        if (it.SbCutSec > 10 && Lib.Config.SponsorRemove.Count > 0 && dur > it.DurationSec - it.SbCutSec / 2)
-            throw new IOException("SponsorBlock не вырезал сегменты — файл не принят");
+        if (it.Kind != "short" && it.SbCutSec > 10 && Lib.Config.SponsorRemove.Count > 0 && dur > it.DurationSec - it.SbCutSec / 2)
+            throw new SponsorCutException("SponsorBlock не вырезал сегменты");
 
+        await StorageWriter.WaitAsync(ct);
+        try
+        {
+        ct.ThrowIfCancellationRequested();
+        var space = await Task.Run(m.Space, ct);
+        if (space == null || space.Value.Free - new FileInfo(file).Length < m.Storage.Budget.ReserveBytes)
+            throw new IOException("На носителе не хватит места с учётом резерва");
         // onto the storage: temporary name first, the real one only when the bytes are all there
         Set(row, Q.Copying, "");
         var where = m.Phone != null ? "копирую на телефон…" : "копирую на носитель…";
@@ -499,9 +549,9 @@ public static class Downloader
             }
         }
         catch (Exception) { }
-        if (thumb == null)
+        if (thumb == null && !ct.IsCancellationRequested)
         {   // no picture on YouTube: a frame from the file while it is still here (a phone on the cable can't be read back cheaply)
-            await Task.Run(() => Lib.Frame(file, (long)(dur * 1000), Path.Combine(td, it.Id + ".frame.jpg")), ct);
+            await Task.Run(() => Lib.Frame(file, (long)(dur * 1000), Path.Combine(td, it.Id + ".frame.jpg")));
             if (File.Exists(Path.Combine(td, it.Id + ".frame.jpg"))) thumb = "thumbs/" + it.Id + ".frame.jpg";
         }
 
@@ -520,10 +570,17 @@ public static class Downloader
         });
         foreach (var old in Lib.RedownloadRequests().Where(v => v.Meta.YtId == it.Id).ToList())
             Lib.SetFlags(old.Mount, old.Key, f => f with { Redownload = false });
-        Lib.Flush(m);
+        await Task.Run(() => Lib.Flush(m));
         try { Directory.Delete(tmp, true); } catch (IOException) { }
         return note;
+        }
+        finally { StorageWriter.Release(); }
     }
+
+    sealed class SponsorCutException(string message) : IOException(message);
+    public static bool IsSponsorFailure(string error, bool cutting) =>
+        error.Contains("SponsorBlock", StringComparison.OrdinalIgnoreCase) || error.Contains("ModifyChapters", StringComparison.OrdinalIgnoreCase)
+        || cutting && (error.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase) || error.Contains("Postprocessing", StringComparison.OrdinalIgnoreCase));
 
     static string LogPath(string id) => Path.Combine(Directory.CreateDirectory(Path.Combine(Lib.LocalDir, "logs")).FullName, id + ".log");
 

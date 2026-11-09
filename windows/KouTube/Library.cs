@@ -47,7 +47,17 @@ public sealed class Mount(StorageRef r)
     public string Local => Directory.CreateDirectory(Path.Combine(Lib.LocalDir, "s", Ref.StorageId)).FullName;
     public string Name => Storage.Name ?? Ref.Name;
 
-    public void Remerge() => Merged = Format.Merge([.. Others, new DeviceFile { DeviceId = Lib.DeviceId, Items = Mine }]);
+    public void Remerge(string? key = null)
+    {
+        var devices = Others.Append(new DeviceFile { DeviceId = Lib.DeviceId, Items = Mine });
+        if (key == null) Merged = Format.Merge(devices.ToList());
+        else
+        {
+            var result = Format.Merge(devices.Select(d => d with { Items = d.Items.TryGetValue(key, out var item)
+                ? new Dictionary<string, Item> { [key] = item } : [] }).ToList());
+            if (result.TryGetValue(key, out var merged)) Merged[key] = merged;
+        }
+    }
 
     public (long Free, long Total)? Space()
     {
@@ -98,6 +108,10 @@ public record Config
     public bool FillAll { get; init; } = true;
     /// <summary>Take videos from «Смотреть позже» too. Off: many keep there what they watched long ago.</summary>
     public bool UseWatchLater { get; init; }
+    public string PickDuration { get; init; } = "auto";
+    public string AccountProfile { get; init; } = "default";
+    public List<string> AccountProfiles { get; init; } = ["default"];
+    public bool UseAccount { get; init; } = true;
 }
 
 public record Wanted(string Id, string Url, string Title, string? Channel, double? DurationSec, string Kind);
@@ -291,6 +305,8 @@ public static class Lib
         void Walk(string dir, string rel, string role, int depth)
         {
             var names = Directory.EnumerateFiles(dir).Select(Path.GetFileName).OfType<string>().ToList();
+            var subtitles = names.Where(n => n.EndsWith(".vtt") || n.EndsWith(".srt")).ToList();
+            var nameSet = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var name in names.Where(Format.IsVideoName))
             {
                 var full = Path.Combine(dir, name);
@@ -301,9 +317,9 @@ public static class Lib
                 next[r] = new(fi.Length, mt, key);
                 if (found.ContainsKey(key)) continue;
                 var b = Path.GetFileNameWithoutExtension(name);
-                var subs = names.Where(n => n.StartsWith(b + ".") && (n.EndsWith(".vtt") || n.EndsWith(".srt")))
+                var subs = subtitles.Where(n => n.StartsWith(b + ".", StringComparison.OrdinalIgnoreCase))
                     .Select(n => new Sub(n[(b.Length + 1)..].Split('.')[0], rel == "." ? n : rel + "/" + n)).ToList();
-                var thumb = new[] { "jpg", "jpeg", "png", "webp" }.Select(e => b + "." + e).FirstOrDefault(names.Contains);
+                var thumb = new[] { "jpg", "jpeg", "png", "webp" }.Select(e => b + "." + e).FirstOrDefault(nameSet.Contains);
                 found[key] = new Found(full, r, fi.Length, fi.LastWriteTime, subs, thumb == null ? null : Path.Combine(dir, thumb));
             }
             if (depth < 2)
@@ -488,7 +504,7 @@ public static class Lib
     public static async Task FetchComments(Mount m, Action<string>? progress = null, int perRun = 15)
     {
         if (!m.Online || Config.Comments <= 0) return;
-        var todo = m.Merged.Where(e => e.Value.Meta is { YtId: not null, Comments: null } && m.Docs.ContainsKey(e.Key)).Take(perRun).ToList();
+        var todo = m.Merged.Where(e => e.Value.Meta is { YtId: not null, Comments: null, Kind: not "short" } && m.Docs.ContainsKey(e.Key)).Take(perRun).ToList();
         var n = 0;
         foreach (var (k, item) in todo)
         {
@@ -594,7 +610,7 @@ public static class Lib
         lock (m)
         {
             m.Mine[key] = f(m.Mine.GetValueOrDefault(key) ?? new Item());
-            m.Remerge();
+            m.Remerge(key);
             m.Dirty = true;
         }
     }
@@ -615,26 +631,40 @@ public static class Lib
 
     // ---------- removing what was watched (the phone never deletes on its own) ----------
 
-    public static List<Video> Watched(Mount m) => Videos().Where(v => v.Mount == m && v.Present && v.Watch.Status == Watch.Finished).ToList();
+    static bool EverWatched(Watch? w) => w != null && (w.Status != Watch.New || w.PosMs > 0 || w.LastWatchedAt != null || w.FinishedAt != null || !string.IsNullOrEmpty(w.Coverage));
+
+    public static bool StaleUnwatched(Video v, long now) => v.Present && v.Watch.Status == Watch.New
+        && v.Watch.PosMs == 0 && v.Watch.LastWatchedAt == null && v.Watch.FinishedAt == null
+        && string.IsNullOrEmpty(v.Watch.Coverage) && !v.Flags.Keep && v.Flags.Rating <= 0 && !v.Flags.Redownload
+        && !v.Mount.Others.Any(d => EverWatched(d.Items.GetValueOrDefault(v.Key)?.Watch))
+        && !EverWatched(v.Mount.Mine.GetValueOrDefault(v.Key)?.Watch)
+        && v.Meta.AddedAt is > 0 && now - v.Meta.AddedAt.Value >= 30L * 86400_000;
+
+    public static List<Video> Stale(Mount m) => Videos().Where(v => v.Mount == m && StaleUnwatched(v, Format.Now()))
+        .OrderBy(v => v.Flags.Rating).ThenBy(v => v.Meta.AddedAt).ToList();
+
+    public static List<Video> Watched(Mount m) => Videos().Where(v => v.Mount == m && v.Present && v.Watch.Status == Watch.Finished && !v.Flags.Keep).ToList();
 
     /// <summary>
     /// Deletes watched videos the user ticked: only a file whose fingerprint still matches its record,
     /// plus its subtitles; the card, history and a cover stay, and it is never downloaded again by itself.
     /// </summary>
-    public static (int Count, long Bytes) DeleteWatched(Mount m, IEnumerable<Video> list)
+    public static (int Count, long Bytes) DeleteWatched(Mount m, IEnumerable<Video> list, bool replaceStale = false)
     {
         int n = 0; long bytes = 0;
         var gone = new HashSet<string>();
         foreach (var v in list)
         {
-            if (v.Found is not { } f) continue;
+            if (v.Mount != m || v.Flags.Keep || v.Found is not { } f) continue;
+            var latest = new Video(v.Key, m, m.Merged.GetValueOrDefault(v.Key) ?? new Item { Meta = v.Meta, Watch = v.Watch, Flags = v.Flags }, f);
+            if (latest.Flags.Keep || (replaceStale ? !StaleUnwatched(latest, Format.Now()) : latest.Watch.Status != Watch.Finished)) continue;
             if (m.Phone != null)
             {
                 // over the cable the file is matched by path and size (fingerprinting it would mean reading it all)
                 if (f.Size != v.Meta.Size) continue;
                 try { Mtp.Delete(m.Phone, f.RelPath); foreach (var s in f.Subs) Mtp.Delete(m.Phone, s.Path); }
                 catch (Exception) { continue; }
-                MarkGone(m, v);
+                MarkGone(m, v, replaceStale);
                 n++; bytes += f.Size; gone.Add(v.Key);
                 continue;
             }
@@ -656,7 +686,7 @@ public static class Lib
                 Edit(m, v.Key, i => i with
                 {
                     Meta = thumb != v.Meta.Thumb ? (cur?.Meta ?? v.Meta) with { Thumb = thumb, Ts = Format.NextTs(cur?.Meta?.Ts) } : i.Meta,
-                    File = new FileState { Ts = Format.NextTs(cur?.File?.Ts), State = FileState.AfterWatch, At = Format.Now(), Reason = "watched" },
+                    File = new FileState { Ts = Format.NextTs(cur?.File?.Ts), State = replaceStale ? FileState.ByUser : FileState.AfterWatch, At = Format.Now(), Reason = replaceStale ? "refresh" : "watched" },
                     Flags = (cur?.Flags ?? new Flags()) with { Ts = Format.NextTs(cur?.Flags?.Ts), NoAutoRedownload = true },
                 });
                 n++; bytes += f.Size; gone.Add(v.Key);
@@ -669,12 +699,12 @@ public static class Lib
         return (n, bytes);
     }
 
-    static void MarkGone(Mount m, Video v)
+    static void MarkGone(Mount m, Video v, bool replaceStale = false)
     {
         var cur = m.Merged.GetValueOrDefault(v.Key);
         Edit(m, v.Key, i => i with
         {
-            File = new FileState { Ts = Format.NextTs(cur?.File?.Ts), State = FileState.AfterWatch, At = Format.Now(), Reason = "watched" },
+            File = new FileState { Ts = Format.NextTs(cur?.File?.Ts), State = replaceStale ? FileState.ByUser : FileState.AfterWatch, At = Format.Now(), Reason = replaceStale ? "refresh" : "watched" },
             Flags = (cur?.Flags ?? new Flags()) with { Ts = Format.NextTs(cur?.Flags?.Ts), NoAutoRedownload = true },
         });
     }

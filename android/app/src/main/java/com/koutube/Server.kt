@@ -56,6 +56,10 @@ object Server {
     val code = MutableStateFlow("")
     val devices = MutableStateFlow<Map<String, String>>(emptyMap())      // token → device name
     val port = MutableStateFlow(PORT)
+    val access = MutableStateFlow<Map<String, List<ShareFolder>>>(emptyMap())
+    private var identities = emptyMap<String, String>()
+    private val connections = java.util.concurrent.Semaphore(12)
+    private val clients = ConcurrentHashMap.newKeySet<Socket>()
 
     private val prefs get() = App.instance.getSharedPreferences("koutube-server", 0)
     private var socket: ServerSocket? = null
@@ -69,7 +73,22 @@ object Server {
     private var wifi: WifiManager.WifiLock? = null
 
     init {
+        access.value = runCatching { json.decodeFromString<Map<String, List<ShareFolder>>>(prefs.getString("access", "{}")!!) }.getOrDefault(emptyMap())
+        identities = runCatching { json.decodeFromString<Map<String, String>>(prefs.getString("identities", "{}")!!) }.getOrDefault(emptyMap())
         devices.value = runCatching { json.decodeFromString<Map<String, String>>(prefs.getString("tokens", "{}")!!) }.getOrDefault(emptyMap())
+    }
+
+    fun grants(token: String) = access.value[token].orEmpty()
+
+    @Synchronized fun setAccess(token: String, folders: List<ShareFolder>) {
+        if (token !in devices.value) return
+        access.value = access.value + (token to folders.distinct())
+        prefs.edit().putString("access", json.encodeToString(access.value)).apply()
+    }
+
+    private fun allowed(token: String, storageId: String, key: String): Boolean {
+        val v = Lib.videos.value.firstOrNull { it.storageId == storageId && it.key == key } ?: return false
+        return canReadFolder(grants(token), storageId, v.found?.path ?: v.meta.path)
     }
 
     fun start(ctx: Context) {
@@ -79,7 +98,10 @@ object Server {
 
     fun stop(ctx: Context) { ctx.stopService(Intent(ctx, ServerService::class.java)) }
 
-    fun forget(token: String) {
+    @Synchronized fun forget(token: String) {
+        access.value = access.value - token
+        identities = identities.filterValues { it != token }
+        prefs.edit().putString("access", json.encodeToString(access.value)).putString("identities", json.encodeToString(identities)).apply()
         devices.value = devices.value - token
         prefs.edit().putString("tokens", json.encodeToString(devices.value)).apply()
     }
@@ -106,7 +128,11 @@ object Server {
             while (!ss.isClosed) {
                 val s = runCatching { ss.accept() }.getOrNull() ?: break
                 runCatching { s.sendBufferSize = 1 shl 20 }      // a big send window keeps Wi-Fi busy while the stick is read
-                thread(name = "koutube-conn") { runCatching { handle(s) }; runCatching { s.close() } }
+                if (!connections.tryAcquire()) { s.close(); continue }
+                clients.add(s)
+                thread(name = "koutube-conn") {
+                    try { runCatching { handle(s) } } finally { runCatching { s.close() }; clients.remove(s); connections.release() }
+                }
             }
         }
         thread(name = "koutube-idle") {
@@ -120,6 +146,7 @@ object Server {
 
     internal fun shutdown(ctx: Context) {
         runCatching { socket?.close() }
+        clients.forEach { runCatching { it.close() } }
         socket = null
         nsd?.let { l -> runCatching { (ctx.getSystemService(Context.NSD_SERVICE) as NsdManager).unregisterService(l) } }
         nsd = null
@@ -139,7 +166,7 @@ object Server {
     }
 
     // Keep CPU and Wi-Fi awake only while a video is actually going out.
-    private fun streamStarted(key: String) {
+    @Synchronized private fun streamStarted(key: String) {
         streams.getOrPut(key) { AtomicInteger() }.incrementAndGet()
         if (open.incrementAndGet() == 1) synchronized(this) {
             val ctx = App.instance
@@ -149,8 +176,8 @@ object Server {
         }
     }
 
-    private fun streamEnded(key: String) {
-        streams[key]?.decrementAndGet()
+    @Synchronized private fun streamEnded(key: String) {
+        streams[key]?.let { if (it.decrementAndGet() == 0) streams.remove(key, it) }
         if (open.decrementAndGet() == 0) releaseLocks()
     }
 
@@ -179,16 +206,19 @@ object Server {
         val parts = line.split(' ')
         if (parts.size < 2) return null
         val h = HashMap<String, String>()
+        var headerCount = 0
         while (true) {
             val l = readLine(i) ?: return null
             if (l.isEmpty()) break
+            if (++headerCount > 100) return null
             val c = l.indexOf(':')
             if (c > 0) h[l.substring(0, c).trim().lowercase()] = l.substring(c + 1).trim()
         }
-        val n = h["content-length"]?.toIntOrNull()?.coerceIn(0, 1 shl 20) ?: 0
+        val n = if ("content-length" in h) h["content-length"]?.toIntOrNull() ?: return null else 0
+        if (n !in 0..(1 shl 20)) return null
         val body = ByteArray(n)
         var got = 0
-        while (got < n) { val r = i.read(body, got, n - got); if (r < 0) break; got += r }
+        while (got < n) { val r = i.read(body, got, n - got); if (r < 0) return null; got += r }
         val target = parts[1]
         val q = target.substringAfter('?', "").split('&').filter { it.contains('=') }
             .associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
@@ -205,6 +235,19 @@ object Server {
         head(o, code, type, b.size.toLong()); o.write(b); o.flush()
     }
 
+    private fun library(o: OutputStream, r: Req, token: String) {
+        val folders = grants(token)
+        val body = json.encodeToString(Lib.snapshot().let { lib -> lib.copy(items = lib.items.filter {
+            canReadFolder(folders, it.storageId, it.item.meta?.path)
+        }) })
+        if (!r.headers["accept-encoding"].orEmpty().contains("gzip")) return text(o, 200, body)
+        val bytes = java.io.ByteArrayOutputStream().also { out ->
+            java.util.zip.GZIPOutputStream(out).use { it.write(body.toByteArray()) }
+        }.toByteArray()
+        head(o, 200, "application/json; charset=utf-8", bytes.size.toLong(), "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n")
+        o.write(bytes); o.flush()
+    }
+
     private fun isLocal(a: InetAddress) = a.isSiteLocalAddress || a.isLoopbackAddress || a.isLinkLocalAddress
 
     private fun handle(s: Socket) {
@@ -217,37 +260,51 @@ object Server {
         if (r.method == "POST" && r.path == "/pair") return pair(o, r)
         val token = r.headers["x-koutube-token"] ?: r.query["t"]
         if (token == null || token !in devices.value) return text(o, 401, "{}")
-        val p = r.path.split('/').filter { it.isNotEmpty() }        // api, what, storageId, key, …
+        val p = r.path.split('/').filter { it.isNotEmpty() }
+        if (p.size >= 4 && !allowed(token, p[2], if (p[1] == "video") p[3].substringBefore('.') else p[3])) return text(o, 403, "{}")        // api, what, storageId, key, …
         when {
-            r.method == "GET" && r.path == "/api/library" -> text(o, 200, json.encodeToString(Lib.snapshot()))
-            r.method == "GET" && p.size >= 4 && p[1] == "video" -> video(o, r, p[2], p[3].substringBefore('.'))
+            r.method == "GET" && r.path == "/api/library" -> library(o, r, token)
+            r.method == "GET" && p.size >= 4 && p[1] == "video" -> video(o, r, p[2], p[3].substringBefore('.'), token)
             r.method == "GET" && p.size >= 4 && p[1] == "thumb" -> thumb(o, p[2], p[3])
             r.method == "GET" && p.size >= 4 && p[1] == "avatar" -> avatar(o, p[2], p[3])
             r.method == "GET" && p.size >= 4 && p[1] == "comments" -> comments(o, p[2], p[3])
             r.method == "GET" && p.size >= 5 && p[1] == "sub" -> sub(o, p[2], p[3], p[4])
             r.method == "POST" && r.path == "/api/edit" -> {
                 val e = json.decodeFromString<RemoteEdit>(String(r.body))
-                Lib.applyRemote(e)
+                if (!allowed(token, e.storageId, e.key) || e.delete) return text(o, 403, "{}")
+                runBlocking { Lib.applyRemote(e).join() }
+                text(o, 200, "{}")
+            }
+            r.method == "POST" && r.path == "/api/edits" -> {
+                val edits = runCatching { json.decodeFromString<List<RemoteEdit>>(String(r.body)) }.getOrNull() ?: return text(o, 400, "{}")
+                if (edits.size > 100 || edits.any { it.delete || !allowed(token, it.storageId, it.key) }) return text(o, 403, "{}")
+                runBlocking { edits.forEach { Lib.applyRemote(it).join() } }
                 text(o, 200, "{}")
             }
             else -> text(o, 404, "{}")
         }
     }
 
-    private fun pair(o: OutputStream, r: Req) {
+    @Synchronized private fun pair(o: OutputStream, r: Req) {
         val now = System.currentTimeMillis()
         if (now - wrongSince > 60_000) { wrongCodes = 0; wrongSince = now }
         if (wrongCodes >= 5) return text(o, 429, "{}")                  // no guessing 10 000 codes
         val p = runCatching { json.decodeFromString<PairRequest>(String(r.body)) }.getOrNull() ?: return text(o, 403, "{}")
         if (p.code != code.value) { wrongCodes++; return text(o, 403, "{}") }
         val t = ByteArray(16).also { SecureRandom().nextBytes(it) }.hex()
-        // the same tablet pairing again replaces its old entry instead of piling up copies
-        devices.value = devices.value.filterValues { it != p.name.take(60) } + (t to p.name.take(60))
+        if (p.deviceId.isBlank() || p.deviceId.length > 128) return text(o, 403, "{}")
+        val old = identities[p.deviceId]
+        val saved = old?.let { grants(it) }.orEmpty()
+        devices.value = (if (old == null) devices.value else devices.value - old) + (t to p.name.take(60))
+        access.value = (if (old == null) access.value else access.value - old) + (t to saved)
+        identities = identities + (p.deviceId to t)
+        prefs.edit().putString("access", json.encodeToString(access.value)).putString("identities", json.encodeToString(identities)).apply()
         prefs.edit().putString("tokens", json.encodeToString(devices.value)).apply()
         text(o, 200, json.encodeToString(PairReply(t, Lib.deviceName)))
     }
 
-    private fun video(o: OutputStream, r: Req, storageId: String, key: String) {
+    private fun video(o: OutputStream, r: Req, storageId: String, key: String, token: String) {
+        val path = Lib.videos.value.firstOrNull { it.storageId == storageId && it.key == key }?.let { it.found?.path ?: it.meta.path }
         val (uri, size, name) = Lib.fileFor(storageId, key) ?: return text(o, 404, "{}")
         val type = when (name.substringAfterLast('.').lowercase()) { "webm" -> "video/webm"; "mkv" -> "video/x-matroska"; else -> "video/mp4" }
         var start = 0L
@@ -256,7 +313,7 @@ object Server {
         if (range != null && range.startsWith("bytes=")) {
             val (a, b) = range.removePrefix("bytes=").substringBefore(',').split('-').let { it[0] to it.getOrElse(1) { "" } }
             if (a.isEmpty()) start = maxOf(0, size - (b.toLongOrNull() ?: 0)) else { start = a.toLongOrNull() ?: 0; b.toLongOrNull()?.let { end = minOf(it, size - 1) } }
-            if (start >= size) return head(o, 416, type, 0, "Content-Range: bytes */$size\r\n").also { o.flush() }
+            if (start < 0 || end < start || start >= size) return head(o, 416, type, 0, "Content-Range: bytes */$size\r\n").also { o.flush() }
         }
         val len = end - start + 1
         head(o, if (range != null) 206 else 200, type, len,
@@ -269,7 +326,7 @@ object Server {
                     ch.position(start)
                     val buf = ByteBuffer.allocate(256 * 1024)      // a USB stick over OTG reads fastest in big pieces
                     var left = len
-                    while (left > 0) {
+                    while (left > 0 && token in devices.value && canReadFolder(grants(token), storageId, path)) {
                         buf.clear(); if (left < buf.capacity()) buf.limit(left.toInt())
                         val n = ch.read(buf); if (n <= 0) break
                         o.write(buf.array(), 0, n); left -= n

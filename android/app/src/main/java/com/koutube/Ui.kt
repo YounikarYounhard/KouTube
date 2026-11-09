@@ -173,7 +173,7 @@ fun Root() {
     val short = playing?.isShort == true
     val mini = playing != null && minimized && !short
     // leaving the Shorts tab ends the Short, like YouTube
-    val goTab: (Int) -> Unit = { i -> if (tab == 1 && i != 1 && short) Playback.close(); search = null; tab = i }
+    val goTab: (Int) -> Unit = { i -> if (tab == 1 && i != 1 && short) Playback.close(); search = null; tab = i; if (i == 0) Lib.newFeed() }
     LaunchedEffect(short, tab) { if (short && tab != 1) Playback.close() }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -193,7 +193,7 @@ fun Root() {
             }
         }
         if (mini) FloatingPlayer(maxWidth, maxHeight, aboveTabs = search == null, onClose = Playback::close)
-        if (playing != null && !mini && !short) PlayerScreen(all, play, onClose = Playback::close)
+        if (playing != null && !mini && !short) PlayerScreen(all, play, onClose = { Playback.close(); Lib.newFeed() })
     }
     BackHandler(search != null) { search = null }
 }
@@ -366,19 +366,22 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
     // every video is somewhere in the feed, watched ones at the bottom. A "continue" shelf only pays off in a big
     // library; in a small one it would just repeat the cards below, so started videos simply lead the feed
     val shelf = cont.isNotEmpty() && videos.size > 8
-    val fresh = sorted(videos.filter { !it.started && !it.finished }, s.sort)
-    val byState = (if (shelf) fresh + sorted(cont, s.sort) else cont + fresh) + sorted(videos.filter { it.finished }, s.sort)
+    val feedSeed by Lib.feedVisit.collectAsState()
+    val recommended by produceState<List<Video>>(emptyList(), all, feedSeed) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { localFeed(all, feedSeed) }
+    }
+    val byState = recommended
     val list = when (filter) {
         "all" -> sorted(videos, s.sort)
         "continue" -> cont
         "new" -> sorted(videos.filter { it.watch.status == Watch.NEW }, s.sort)
         else -> byState
     }
-    val shortKeys = all.filter { it.present && it.isShort }.map { it.key }.toSet()
+    val shortKeys = all.filter { it.present && it.isShort && !it.finished }.map { it.key }.toSet()
     val shorts = remember(shortKeys) { shortsFeed(all, null) }        // shuffled once, not on every redraw
     val wide = wideFeed()
     Column {
-        TopBar("KouTube", onSearch) { ModeChip(); SortMenu() }
+        TopBar("KouTube", onSearch) { IconButton(Lib::newFeed) { Icon(Icons.Rounded.Refresh, "Новая подборка") }; ModeChip(); SortMenu() }
         if (storages.isEmpty() && !Lib.isClient) {
             Empty("Добро пожаловать", "Подключите флешку через OTG-переходник или выберите папку с видео в памяти телефона, например Download/YTDLnis.",
                 "Выбрать флешку или папку" to onAdd)
@@ -413,7 +416,7 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
                 }, Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             // YouTube puts a Shorts shelf a couple of videos into the feed
-            val withShorts = filter == "home" && shorts.isNotEmpty()
+            val withShorts = filter == "home" && s.showShorts && shorts.isNotEmpty()
             val split = if (withShorts) minOf(2, list.size) else list.size
             items(list.take(split), key = { it.storageId + it.key }) { v -> VideoCard(v, { play(list, v) }) }
             if (withShorts) item(span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(shorts, wide, play) }
@@ -466,28 +469,20 @@ fun wideFeed() = LocalConfiguration.current.screenWidthDp >= 600
  * disliked ones lower; shuffled, so every visit starts somewhere new.
  */
 fun shortsFeed(all: List<Video>, first: Video?): List<Video> {
-    val taste = HashMap<String, Double>()
-    for (v in all) {
-        val c = v.meta.channel ?: continue
-        taste[c] = (taste[c] ?: 0.0) + when { v.flags.rating > 0 -> 1.0; v.flags.rating < 0 -> -1.5; v.finished -> 0.3; else -> 0.0 }
-    }
-    val rnd = java.util.Random()
-    return listOfNotNull(first) + all.filter { it.present && it.isShort && it.key != first?.key }
-        .map { v -> v to (rnd.nextDouble() + (if (v.finished) 0.0 else 1.5) - (if (v.flags.rating < 0) 3.0 else 0.0) +
-            0.4 * (taste[v.meta.channel] ?: 0.0).coerceIn(-2.0, 1.5)) }
-        .sortedByDescending { it.second }.map { it.first }
+    return listOfNotNull(first) + localFeed(all, System.nanoTime(), shorts = true)
+        .filter { it.key != first?.key || it.storageId != first?.storageId }
 }
 
 /** The Shorts tab is the player itself, like YouTube: open it and a Short is already playing; swipe for the next. */
 @Composable
 fun ShortsTab(all: List<Video>, onClose: () -> Unit) {
     val cur by Playback.current.collectAsState()
-    if (all.none { it.present && it.isShort }) {
+    if (cur?.isShort != true && all.none { it.present && it.isShort && !it.finished && it.flags.rating >= 0 }) {
         Column { TopBar("Shorts", null); Empty("Shorts пока нет", "Вертикальные короткие видео появятся здесь сами — из папки Shorts или по ориентации кадра.") }
         return
     }
     if (cur?.isShort != true) {
-        LaunchedEffect(Unit) { val feed = shortsFeed(all, null); Playback.play(feed, feed.first()) }
+        LaunchedEffect(Unit) { val feed = shortsFeed(all, null); feed.firstOrNull()?.let { Playback.play(feed, it) } }
         Box(Modifier.fillMaxSize().background(Color.Black))
         return
     }
@@ -587,27 +582,36 @@ private fun HistoryRow(v: Video, onClick: () -> Unit) {
 /** The start of a word that survives its endings: "путешествие" → "путешест", which also finds "путешествия", "путешествую". */
 private fun stem(w: String) = if (w.length <= 4) w else w.take(maxOf(4, Math.round(w.length * 0.72f)))
 
-private fun words(s: String) = unFullwidth(s).lowercase().split(Regex("[^\\p{L}\\p{Nd}]+")).filter { it.isNotEmpty() }
+private val wordBreak = Regex("[^\\p{L}\\p{Nd}]+")
+private fun words(s: String) = unFullwidth(s).lowercase().replace('ё', 'е').split(wordBreak).filter { it.isNotEmpty() }
 
 /**
  * Search like a person means it: every word of the query (in any form) appears in the title, channel, category
  * or the video's YouTube tags — "путешествие" finds "Путешествия по Японии" and a video tagged #путешествия.
  */
 fun matches(v: Video, query: String): Boolean {
+    val normalized = unFullwidth(query).trim().lowercase().replace('ё', 'е')
     val hay = (listOfNotNull(v.title, v.meta.channel, v.meta.category) + v.meta.tags.orEmpty()).flatMap(::words)
     val whole = unFullwidth(listOfNotNull(v.title, v.meta.channel).joinToString(" ")).lowercase()
-    return whole.contains(query) || words(query).all { q -> stem(q).let { st -> hay.any { it.startsWith(st) } } }
+    return whole.replace('ё', 'е').contains(normalized) || words(normalized).all { q -> stem(q).let { st -> hay.any { it.startsWith(st) } } }
 }
 
 @Composable
 fun SearchScreen(q: String, onQuery: (String) -> Unit, onBack: () -> Unit, all: List<Video>, play: (List<Video>, Video) -> Unit) {
     val needle = unFullwidth(q.trim()).lowercase()
-    val found = if (needle.isEmpty()) emptyList() else all.filter { matches(it, needle) }
-        .sortedWith(compareByDescending<Video> { it.present }.thenByDescending { it.meta.addedAt ?: 0 })
+    val index = remember(all) { all.filter { it.present && !it.finished } }
+    val found by produceState<List<Video>>(emptyList(), needle, index) {
+        value = emptyList()
+        kotlinx.coroutines.delay(180)
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            if (needle.isEmpty()) emptyList() else index.asSequence().filter { matches(it, needle) }
+                .sortedWith(compareByDescending<Video> { searchScore(it, needle) }.thenByDescending { it.meta.addedAt ?: 0 }).toList()
+        }
+    }
     val videos = found.filter { !it.isShort }
     val shorts = found.filter { it.isShort && it.present }
     // before typing: the channels in the library, like YouTube's suggestions — it works without internet
-    val channels = all.filter { it.present }.groupBy { it.meta.channel }.filterKeys { it != null }.entries.sortedByDescending { it.value.size }
+    val channels = remember(index) { index.groupBy { it.meta.channel }.filterKeys { it != null }.entries.sortedByDescending { it.value.size } }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     val wide = wideFeed()
@@ -713,6 +717,13 @@ fun SettingsScreen(onAdd: () -> Unit) {
                     }
                 }, confirmButton = { TextButton({ modes = false }) { Text("Закрыть") } })
 
+            Section("Воспроизведение и лента")
+            Toggle("Следующее видео автоматически", "Выключите, чтобы останавливаться в конце ролика", s.autoplay) { on ->
+                Lib.updateSettings { it.copy(autoplay = on) }
+                if (!Playback.sleeping) Playback.player.pauseAtEndOfMediaItems = !on
+            }
+            Toggle("Субтитры по умолчанию", null, s.defaultSubtitles) { on -> Lib.updateSettings { it.copy(defaultSubtitles = on) }; Playback.setSubtitles(on) }
+            Toggle("Полка Shorts на главной", null, s.showShorts) { on -> Lib.updateSettings { it.copy(showShorts = on) } }
             Section("Оформление")
             listOf("system" to "Как в системе", "dark" to "Тёмная", "light" to "Светлая").forEach { (k, t) ->
                 Row(Modifier.fillMaxWidth().clickable { Lib.updateSettings { it.copy(theme = k) } }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {

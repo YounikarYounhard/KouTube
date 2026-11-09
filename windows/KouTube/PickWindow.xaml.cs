@@ -31,13 +31,16 @@ public partial class PickWindow : Window
         FillAll.IsChecked = c.FillAll;
         Closed += (_, _) => Pick.Pics.Clear();      // hundreds of covers: they go with the window
         WatchLater.IsChecked = c.UseWatchLater;
+        UseAccount.IsChecked = c.UseAccount;
+        DurationMode.SelectedValue = c.PickDuration;
+        ProfileUi();
         AccountUi();
         Chips();
         Show(1);
         // not signed in: offer it every time — with the account the picks are a different class
         Loaded += (_, _) =>
         {
-            if (Account.SignedIn) return;
+            if (!Lib.Config.UseAccount || Account.SignedIn) return;
             if (MessageBox.Show(this, "Войти в YouTube?\n\nТогда подборка будет как ваша главная: по истории просмотров, подпискам, рекомендациям и «Смотреть позже». " +
                     "Без входа — только по вашей библиотеке и по каналам и словам, которые вы укажете.", "Подборка", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
             Account.SignIn(this);
@@ -55,7 +58,7 @@ public partial class PickWindow : Window
         foreach (var (t, i) in new[] { (Step1, 1), (Step2, 2), (Step3, 3) }) t.Opacity = i == step ? 1 : 0.4;
         BackBtn.Visibility = step > 1 ? Visibility.Visible : Visibility.Hidden;
         NextBtn.Content = step < 3 ? "Далее" : "Скачать";
-        NextBtn.IsEnabled = step != 1 || Lib.Config.Sources.Count + Lib.Config.Keywords.Count + Lib.Config.Wanted.Count > 0 || Lib.Videos().Count > 0 || Account.SignedIn;
+        NextBtn.IsEnabled = step != 1 || Lib.Config.Sources.Count + Lib.Config.Keywords.Count + Lib.Config.Wanted.Count > 0 || Lib.Config.UseAccount && (Lib.Videos().Count > 0 || Account.SignedIn);
         if (step == 1) { ImplicitHint(); AgainHint(); }
     }
 
@@ -146,6 +149,13 @@ public partial class PickWindow : Window
     void ImplicitHint()
     {
         var c = Lib.Config;
+        if (!c.UseAccount)
+        {
+            ImplicitText_Box.Visibility = Visibility.Visible;
+            ImplicitText.Text = "Без аккаунта: добавьте слова, каналы или ссылки. История YouTube и библиотека не определяют темы поиска.";
+            NextBtn.IsEnabled = c.Sources.Count + c.Keywords.Count + c.Wanted.Count > 0;
+            return;
+        }
         if (c.Sources.Count + c.Keywords.Count > 0 || c.LastPickGb != null) { ImplicitText_Box.Visibility = Visibility.Collapsed; return; }
         var (imp, _) = Recommend.Implicit(c, Recommend.Learn(Lib.Videos()), false);
         ImplicitText.Text = Account.SignedIn ? "Ничего не выбрано — подберу как YouTube на главной: по вашей истории, подпискам, рекомендациям и «Смотреть позже»."
@@ -155,9 +165,40 @@ public partial class PickWindow : Window
         NextBtn.IsEnabled = Account.SignedIn || imp.Sources.Count + imp.Keywords.Count > 0;
     }
 
+    bool _profilesLoading;
+    void ProfileUi()
+    {
+        _profilesLoading = true;
+        Profiles.ItemsSource = Lib.Config.AccountProfiles.Select((id, i) => new KeyValuePair<string, string>(id, "Аккаунт " + (i + 1))).ToList();
+        Profiles.DisplayMemberPath = "Value"; Profiles.SelectedValuePath = "Key";
+        Profiles.SelectedValue = Lib.Config.AccountProfile;
+        _profilesLoading = false;
+    }
+    void OnProfile(object sender, SelectionChangedEventArgs e)
+    {
+        if (_profilesLoading || Profiles.SelectedValue is not string id) return;
+        Lib.Update(c => c with { AccountProfile = id }); AccountUi();
+    }
+    void OnAddProfile(object sender, RoutedEventArgs e)
+    {
+        if (Downloader.Running) { MessageBox.Show(this, "Сначала поставьте загрузки на паузу."); return; }
+        var id = Guid.NewGuid().ToString("N");
+        Lib.Update(c => c with { AccountProfile = id, AccountProfiles = [.. c.AccountProfiles, id], UseAccount = true });
+        UseAccount.IsChecked = true; ProfileUi(); Account.SignIn(this); AccountUi();
+    }
+    void OnUseAccount(object sender, RoutedEventArgs e)
+    {
+        Lib.Update(c => c with { UseAccount = UseAccount.IsChecked == true }); AccountUi(); Show(_step);
+    }
+    void OnDuration(object sender, SelectionChangedEventArgs e)
+    {
+        if (DurationMode.SelectedValue is string mode) Lib.Update(c => c with { PickDuration = mode });
+    }
     void AccountUi()
     {
-        AccountText.Text = Account.SignedIn
+        Profiles.IsEnabled = !Downloader.Running;
+        AccountBtn.IsEnabled = !Downloader.Running;
+        AccountText.Text = !Lib.Config.UseAccount ? "Аккаунт не используется. Подборка по вашим словам и каналам." : Account.SignedIn
             ? "YouTube подключён: подборка учитывает вашу историю за последние месяцы, подписки, рекомендации и «Смотреть позже». Видео качаются без аккаунта."
             : "Войдите в YouTube — подборка станет как ваша главная: по истории просмотров, подпискам, рекомендациям и «Смотреть позже».";
         AccountBtn.Content = Account.SignedIn ? "Выйти" : "Войти в YouTube";
@@ -167,7 +208,7 @@ public partial class PickWindow : Window
 
     void OnAccount(object sender, RoutedEventArgs e)
     {
-        if (Account.SignedIn) Account.SignOut(); else Account.SignIn(this);
+        if (Account.SignedIn) Account.SignOut(); else { Lib.Update(c => c with { UseAccount = true }); UseAccount.IsChecked = true; Account.SignIn(this); }
         AccountUi();
         Show(_step);
     }
@@ -204,6 +245,8 @@ public partial class PickWindow : Window
     static string Subs(long s) => s >= 1_000_000 ? $"{s / 1e6:0.#} млн" : s >= 1000 ? $"{s / 1e3:0} тыс." : s.ToString();
 
     void OnChannelKey(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) OnFindChannel(sender, e); }
+    void OnIntent(object sender, RoutedEventArgs e) { foreach (var topic in PickIntent.Topics(IntentBox.Text)) AddKeyword(topic); }
+
     void OnKeywordKey(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) OnAddKeyword(sender, e); }
     void OnAddKeyword(object sender, RoutedEventArgs e) { AddKeyword(KeywordBox.Text.Trim()); KeywordBox.Clear(); }
 
@@ -269,56 +312,70 @@ public partial class PickWindow : Window
     async Task Build()
     {
         Show(3);
+        BackBtn.IsEnabled = AgainBtn.IsEnabled = false;
         NextBtn.IsEnabled = false;
         PickProgress.Visibility = Visibility.Visible;
         VideoPicks.ItemsSource = null; ShortPicks.ItemsSource = null;
+        _pickPage = 0;
         VideosHeader.Text = ""; ShortsHeader.Text = ""; PickStatus.Text = "";
         _ring = 0;
         void St(string s, double f) => Ui.OnUi(() => { RingStatus.Text = s; SetRing(_ring = Math.Max(_ring, f)); });
         try
         {
             if (!await Tools.Wait(s => St(s, 0))) { PickStatus.Text = RingStatus.Text; return; }
-            St(Account.SignedIn ? "Смотрю вашу историю на YouTube…" : "Смотрю вашу библиотеку…", 0.01);
+            St(Account.Enabled ? "Смотрю вашу историю на YouTube…" : "Смотрю вашу библиотеку…", 0.01);
             var hist = await Task.Run(Account.History);
             St("Смотрю ваши подписки…", 0.04);
             var subs = await Task.Run(Account.Subscriptions);
-            var it = Recommend.Learn(Lib.Videos(), hist, subs);
-            var (c, shortChannels) = Recommend.Implicit(Lib.Config, it, Account.SignedIn && hist != null);
+            var it = Recommend.Learn(Lib.Config.UseAccount ? Lib.Videos() : [], hist, subs);
+            var (c, shortChannels) = Lib.Config.UseAccount ? Recommend.Implicit(Lib.Config, it, Account.Enabled && hist != null) : (Lib.Config, Lib.Config.Sources);
             var total = (long)(Total.Value * Gb);
             var shorts = (long)(total * Split.Value / 100);
+            if (!c.UseAccount && c.Keywords.Count + c.Sources.Count + c.Wanted.Count == 0) { PickStatus.Text = "Добавьте слово, канал или ссылку для поиска без аккаунта."; return; }
             var (depth, shortDepth) = Recommend.Depth(c, it, total - shorts, shorts, shortChannels.Count);
             var cands = await Task.Run(() => Recommend.Candidates(c, shortChannels, (s, f) => St(s, 0.08 + 0.8 * f), depth, shortDepth));
+            St("Проверяю начало серий…", 0.87);
+            cands = await Task.Run(() => Recommend.SeriesStarts(cands, c, (s, f) => St(s, 0.87 + 0.02 * f)));
             St("Выбираю лучшее…", 0.89);
+            cands = cands.Where(p => p.Kind == "short" ? shorts > 0 : total > shorts).ToList();
             var skip = Lib.DoNotDownload();
             skip.UnionWith(Lib.Config.Seen);
             skip.UnionWith(Lib.Config.NotInterested.Select(x => x.Id));
             skip.UnionWith(hist?.Select(h => h.Id) ?? []);         // already watched on YouTube
             foreach (var r in Downloader.Rows) skip.Add(r.Item.Id);
             // links you added: in, unless already downloaded (then they leave the list for good)
-            var wanted = Lib.Config.Wanted.Where(w => !skip.Contains(w.Id)).ToList();
+            var wanted = Lib.Config.Wanted.Where(w => !skip.Contains(w.Id) && (w.Kind == "short" ? shorts > 0 : total > shorts)).ToList();
             if (wanted.Count != Lib.Config.Wanted.Count) Lib.Update(x => x with { Wanted = Lib.Config.Wanted.Where(w => !Lib.DoNotDownload().Contains(w.Id)).ToList() });
             var ranked = Recommend.Diversify(Recommend.Rank(cands, it, skip).Where(p => wanted.All(w => w.Id != p.Id)).ToList(),
                 Lib.Videos().Select(v => v.Title).Concat(hist?.Select(h => h.Title) ?? []));
             Lib.Update(x => x with { LastPickGb = Total.Value });
-            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true).Fill();
+            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true, Lib.Videos().Where(v => v.Present || v.Watch.Status == Watch.Finished).Select(v => PickIntent.Series(v.Title, v.Meta.Channel)).OfType<PickIntent.Episode>().ToList()).Fill();
             // the list appears whole: every cover is here before it shows, so it scrolls without holes
-            await Recommend.Covers([.. _sel.Videos, .. _sel.Shorts, .. _sel.Spare], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
+            await Recommend.Covers([.. _sel.Videos.Take(60), .. _sel.Shorts.Take(60), .. _sel.Spare.Take(20)], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
             VideoPicks.ItemsSource = _sel.Videos;
             ShortPicks.ItemsSource = _sel.Shorts;
             _sel.Videos.CollectionChanged += (_, _) => Headers();
             _sel.Shorts.CollectionChanged += (_, _) => Headers();
             Headers();
-            PickStatus.Text = (hist == null ? "YouTube не отдал вашу историю — похоже, вход устарел: «Назад» → «Выйти» → «Войти в YouTube». " : "")
+            PickStatus.Text = (_sel.SeriesSkipped > 0 ? $"Серий с пропуском или без начала пропущено: {_sel.SeriesSkipped}. " : "") + (Account.Enabled && hist == null ? "YouTube не отдал вашу историю — похоже, вход устарел: «Назад» → «Выйти» → «Войти в YouTube». " : "")
                 + (ranked.Count == 0 ? "Подходящих новых видео не нашлось — войдите в YouTube, добавьте каналы или ключевые слова."
                     : "✕ — не хочу такое: на его место встанет следующее, этот канал и тема опустятся, после двух ✕ канал больше не предлагается. Глаз — уже видел, просто убрать.");
         }
         catch (Exception ex) { PickStatus.Text = "Не удалось подобрать: " + ex.Message; }
-        finally { PickProgress.Visibility = Visibility.Collapsed; }
+        finally { PickProgress.Visibility = Visibility.Collapsed; BackBtn.IsEnabled = AgainBtn.IsEnabled = true; }
     }
 
+    int _pickPage;
+    void OnPickPrev(object sender, RoutedEventArgs e) { _pickPage = Math.Max(0, _pickPage - 1); Headers(); }
+    void OnPickNext(object sender, RoutedEventArgs e) { _pickPage++; Headers(); }
     void Headers()
     {
         if (_sel == null) return;
+        var pages = Math.Max(1, (Math.Max(_sel.Videos.Count, _sel.Shorts.Count) + 59) / 60);
+        _pickPage = Math.Clamp(_pickPage, 0, pages - 1);
+        PickPage.Text = $"Страница {_pickPage + 1} / {pages}";
+        VideoPicks.ItemsSource = _sel.Videos.Skip(_pickPage * 60).Take(60).ToList();
+        ShortPicks.ItemsSource = _sel.Shorts.Skip(_pickPage * 60).Take(60).ToList();
         VideosHeader.Text = $"Видео · {_sel.Videos.Count} шт. · ≈ {Ui.Gb(_sel.Used(false))} из {Ui.Gb(_sel.VideoBudget)}";
         ShortsHeader.Text = $"Shorts · {_sel.Shorts.Count} шт. · ≈ {Ui.Gb(_sel.Used(true))} из {Ui.Gb(_sel.ShortBudget)}";
         var n = _sel.Videos.Count + _sel.Shorts.Count;

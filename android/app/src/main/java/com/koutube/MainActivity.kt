@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); Lib.refresh() }
+    override fun onResume() { super.onResume(); if (Playback.current.value == null) Lib.newFeed(); Lib.refresh() }
 
     // Leaving the app is a checkpoint: whatever changed goes to the stick now. The sound goes on in the
     // background (another app, screen off) — pause it from the notification or the lock screen.

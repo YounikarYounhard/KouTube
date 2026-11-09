@@ -16,7 +16,13 @@ public record Pick(string Id, string Url, string Title, string? Channel, double?
 
     /// <summary>Covers fetched ahead, url → picture; a card without one loads its cover itself.</summary>
     public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Windows.Media.ImageSource> Pics = new();
-    public object? Img => Thumb != null && Pics.TryGetValue(Thumb, out var i) ? i : Thumb;
+    public object? Img => Thumb != null && Pics.TryGetValue(Thumb, out var i) ? i : SmallCover();
+    object? SmallCover()
+    {
+        if (Thumb == null || !Uri.TryCreate(Thumb, UriKind.Absolute, out var uri)) return null;
+        try { var b = new System.Windows.Media.Imaging.BitmapImage(); b.BeginInit(); b.UriSource = uri; b.DecodePixelWidth = Kind == "short" ? 150 : 250; b.EndInit(); return b; }
+        catch (Exception) { return null; }
+    }
 }
 
 public static class Recommend
@@ -253,7 +259,7 @@ public static class Recommend
             jobs.Add(($"поиск «{kw}»", () => Parse(Flat("https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(kw) + since, Math.Max(depth, 100)),
                 "поиск «" + kw + "»", 0, false, null, _ => true)));
         }
-        if (Account.SignedIn)
+        if (c.UseAccount && Account.SignedIn)
         {
             // the home page, scrolled ~300 deep: YouTube's own picks for you, the Shorts shelf included
             for (var pass = 1; pass <= 3; pass++)      // each visit of the home page brings ~100 videos the last one did not
@@ -281,7 +287,27 @@ public static class Recommend
             status(what, Interlocked.Increment(ref done) / (double)jobs.Count);
         });
         // the same video in several lists (or on the home page twice): the strongest say wins, each extra sighting adds a little
-        return bag.GroupBy(p => p.Id).Select(g => g.MaxBy(p => p.Score)! with { Score = g.Max(p => p.Score) + 0.3 * (g.Count() - 1) }).ToList();
+        var topics = c.Keywords.SelectMany(Words).Select(w => w[..Math.Max(3, (int)(w.Length * 0.72))]).ToList();
+        return bag.Where(p => topics.Count == 0 || p.Source.StartsWith("поиск «") || p.Source.StartsWith("Shorts «#")
+                || c.Sources.Any(src => src.Name == p.Source) || Words(p.Title).Any(w => topics.Any(w.StartsWith)))
+            .GroupBy(p => p.Id).Select(g => g.MaxBy(p => p.Score)! with { Score = g.Max(p => p.Score) + 0.3 * (g.Count() - 1) }).ToList();
+    }
+
+    public static List<Pick> SeriesStarts(List<Pick> candidates, Config config, Action<string, double> status)
+    {
+        var groups = candidates.Where(p => p.Kind != "short").OrderByDescending(p => p.Score)
+            .Select(p => (Pick: p, Series: PickIntent.Series(p.Title, p.Channel))).Where(x => x.Series != null)
+            .GroupBy(x => x.Series!.Group).Where(g => g.All(x => x.Series!.Number != 1)).Take(6).ToList();
+        var extra = new List<Pick>();
+        for (var i = 0; i < groups.Count; i++)
+        {
+            var entry = groups[i].First();
+            status("Ищу начало: " + entry.Series!.Name, i / (double)groups.Count);
+            try { extra.AddRange(Parse(Flat("ytsearch30:" + entry.Series.Name + " " + entry.Pick.Channel, 30), "начало серии", 0, false, null, _ => true)
+                .Where(p => PickIntent.Series(p.Title, p.Channel)?.Group == entry.Series.Group)); }
+            catch (Exception) { }
+        }
+        return candidates.Concat(extra).DistinctBy(p => p.Id).ToList();
     }
 
     static readonly System.Net.Http.HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
@@ -353,7 +379,8 @@ public static class Recommend
             {
                 // the length you usually finish scores best, and every doubling away from it costs more: a three-hour stream
                 // takes the room of ten ordinary videos, so it has to be really wanted to get in
-                var ratio = d / 60 / Math.Max(1, it.MedianMinutes);
+                var target = Lib.Config.PickDuration switch { "long" => 60, "medium" => 20, "short" => 6, _ => it.MedianMinutes };
+                var ratio = d / 60 / Math.Max(1, target);
                 score += Math.Clamp(0.5 - 0.6 * Math.Abs(Math.Log2(Math.Max(ratio, 0.01))), -2, 0.5);
             }
             score += (p.Kind == "short" ? 1 : -1) * Math.Clamp(it.ShortsBias, -1, 1) * 0.5;
@@ -369,15 +396,16 @@ public static class Recommend
     /// </summary>
     public static List<Pick> Diversify(List<Pick> ranked, IEnumerable<string> seenTitles)
     {
-        var kept = seenTitles.Select(t => Words(t).ToHashSet()).Where(w => w.Count >= 3).ToList();
+        var kept = seenTitles.Where(t => PickIntent.Series(t, "series") == null).Select(t => Words(t).ToHashSet()).Where(w => w.Count >= 3).ToList();
         var outList = new List<Pick>();
         foreach (var p in ranked.GroupBy(p => (p.Kind, p.Channel ?? p.Id))
                      .SelectMany(g => g.OrderByDescending(p => p.Score).Select((p, k) => p with { Score = p.Score - k * (p.Kind == "short" ? 1.5 : 0.8) }))
                      .OrderByDescending(p => p.Score))
         {
             var w = Words(p.Title).ToHashSet();
-            if (w.Count >= 3 && kept.Any(k => Jaccard(k, w) >= 0.6)) continue;
-            if (w.Count >= 3) kept.Add(w);
+            var episodic = PickIntent.Series(p.Title, p.Channel) != null;
+            if (!episodic && w.Count >= 3 && kept.Any(k => Jaccard(k, w) >= 0.6)) continue;
+            if (!episodic && w.Count >= 3) kept.Add(w);
             outList.Add(p);
         }
         return outList;
@@ -467,9 +495,18 @@ public static class Recommend
     /// The wizard's third step: the best picks that fit each budget (videos / Shorts). Removing one
     /// pulls in the next best that still fits — the list always fills the space you gave it.
     /// </summary>
-    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null, bool fillAll = false)
+    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null, bool fillAll = false, List<PickIntent.Episode>? available = null)
     {
         readonly List<Pick> _pool = [.. ranked];
+        readonly Dictionary<string, PickIntent.Episode?> _series = ranked.ToDictionary(p => p.Id, p => p.Kind == "short" ? null : PickIntent.Series(p.Title, p.Channel));
+        public int SeriesSkipped => _pool.Count(p => _series.GetValueOrDefault(p.Id) != null);
+        bool Ready(Pick p)
+        {
+            if (_series.GetValueOrDefault(p.Id) is not { } episode || episode.Number == 1) return true;
+            var known = (available ?? []).Concat(Videos.Select(v => PickIntent.Series(v.Title, v.Channel)).OfType<PickIntent.Episode>())
+                .Where(e => e.Group == episode.Group).Select(e => e.Number).ToHashSet();
+            return Enumerable.Range(1, episode.Number - 1).All(known.Contains);
+        }
         public System.Collections.ObjectModel.ObservableCollection<Pick> Videos { get; } = [];
         public System.Collections.ObjectModel.ObservableCollection<Pick> Shorts { get; } = [];
         public long VideoBudget { get; } = videoBytes;
@@ -484,9 +521,9 @@ public static class Recommend
             foreach (var p in pinned ?? []) (p.Kind == "short" ? Shorts : Videos).Add(p);
             pinned = null;
             var total = VideoBudget + ShortBudget;
-            Take(false, VideoBudget - Used(false));
-            if (fillAll) Take(false, VideoBudget + ShortBudget / 4 - Used(false));    // a good video just over the line takes a few Shorts' place
-            Take(true, (fillAll ? total - Used(false) : ShortBudget) - Used(true));
+            Take(false, Math.Min(VideoBudget - Used(false), total - Used(false) - Used(true)));
+            if (fillAll) Take(false, Math.Min(VideoBudget + ShortBudget / 4 - Used(false), total - Used(false) - Used(true)));
+            Take(true, Math.Min((fillAll ? total - Used(false) : ShortBudget) - Used(true), total - Used(false) - Used(true)));
             if (fillAll)                                                               // the rest, too small for any video, gets more Shorts
                 foreach (var shorts in new[] { false, true }) Take(shorts, total - Used(false) - Used(true));
             return this;
@@ -495,9 +532,12 @@ public static class Recommend
         /// <summary>The best picks of one kind that fit in <paramref name="room"/>, in rank order.</summary>
         void Take(bool shorts, long room)
         {
-            foreach (var p in _pool.Where(p => (p.Kind == "short") == shorts).ToList())
+            if ((shorts ? ShortBudget : VideoBudget) <= 0) return;
+            foreach (var p in _pool.Where(p => (p.Kind == "short") == shorts)
+                .GroupBy(p => _series.GetValueOrDefault(p.Id)?.Group ?? p.Id)
+                .SelectMany(g => g.OrderBy(p => _series.GetValueOrDefault(p.Id)?.Number ?? 0)).ToList())
             {
-                if (p.Estimate > room) continue;
+                if (p.Estimate > room || !Ready(p)) continue;
                 (shorts ? Shorts : Videos).Add(p); _pool.Remove(p); room -= p.Estimate;
             }
         }
@@ -506,6 +546,9 @@ public static class Recommend
         public void Remove(Pick p, bool dislike = false)
         {
             Videos.Remove(p); Shorts.Remove(p);
+            if (_series.GetValueOrDefault(p.Id) is { } removed)
+                foreach (var later in Videos.Where(v => _series.GetValueOrDefault(v.Id) is { } e && e.Group == removed.Group && e.Number > removed.Number).ToList())
+                { Videos.Remove(later); _pool.Add(later); }
             if (dislike && p.Channel != null)
             {
                 for (var i = 0; i < _pool.Count; i++) if (_pool[i].Channel == p.Channel) _pool[i] = _pool[i] with { Score = _pool[i].Score - 1.5 };

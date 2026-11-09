@@ -17,7 +17,7 @@ public partial class CleanupWindow : Window
         public bool Delete { get => _delete; set { _delete = value; PropertyChanged?.Invoke(this, new(nameof(Delete))); PropertyChanged?.Invoke(this, new(nameof(CoverOpacity))); Changed?.Invoke(); } }
         public double CoverOpacity => _delete ? 1 : 0.4;
         public string Title => V.Title;
-        public string Channel => V.Meta.Channel ?? "";
+        public string Channel => (V.Meta.Channel ?? "") + (Lib.StaleUnwatched(V, Format.Now()) ? " · не смотрели 30+ дней" + (V.Flags.Rating < 0 ? " · не нравится" : "") : "");
         public string Size => Ui.Gb(V.Found?.Size ?? V.Meta.Size ?? 0);
         public object? Cover => new MainWindow.LibRow(V).Cover;
         public Action? Changed;
@@ -28,11 +28,13 @@ public partial class CleanupWindow : Window
     public List<Video> ToDelete => _rows.Where(r => r.Delete).Select(r => r.V).ToList();
     readonly List<Row> _rows;
     readonly Mount _m;
+    readonly bool _stale;
 
-    public CleanupWindow(Mount m, List<Video> watched)
+    public CleanupWindow(Mount m, List<Video> watched, bool stale = false)
     {
         InitializeComponent();
-        _m = m;
+        _m = m; _stale = stale;
+        if (stale) { Title = "Обновить контент"; Hint.Text = "Не просмотрено ни разу по синхронизированной истории, добавлено 30+ дней назад. Сначала подключите носители всех устройств, чтобы история была актуальной. Снимите галочки с нужных видео. Удаление только после нажатия кнопки ниже."; }
         _rows = watched.Select(v => new Row(v)).ToList();
         foreach (var r in _rows) r.Changed = Update;
         List.ItemsSource = _rows;
@@ -43,7 +45,7 @@ public partial class CleanupWindow : Window
     {
         var sel = _rows.Where(r => r.Delete).ToList();
         var bytes = sel.Sum(r => r.V.Found?.Size ?? 0);
-        Header.Text = $"На «{_m.Name}» просмотрено {_rows.Count} — {Ui.Gb(_rows.Sum(r => r.V.Found?.Size ?? 0))}";
+        Header.Text = $"На «{_m.Name}» {(_stale ? "старых непросмотренных" : "просмотрено")} {_rows.Count} — {Ui.Gb(_rows.Sum(r => r.V.Found?.Size ?? 0))}";
         DeleteAndPickText.Text = sel.Count == 0 ? "Удалить и подобрать новые" : $"Удалить {sel.Count} ({Ui.Gb(bytes)}) и подобрать новые";
         DeleteAndPick.IsEnabled = OnlyDelete.IsEnabled = sel.Count > 0;
     }

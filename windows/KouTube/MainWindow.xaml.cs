@@ -176,6 +176,11 @@ public partial class MainWindow : Window
         }
     }
 
+    int _libraryPage;
+    int _libraryCount;
+    string _libraryFilter = "";
+    void OnLibraryPrev(object sender, RoutedEventArgs e) { _libraryPage = Math.Max(0, _libraryPage - 1); ShowLibrary(); }
+    void OnLibraryNext(object sender, RoutedEventArgs e) { if ((_libraryPage + 1) * 60 < _libraryCount) _libraryPage++; ShowLibrary(); }
     void ShowLibrary()
     {
         if (Cards == null) return;
@@ -205,7 +210,12 @@ public partial class MainWindow : Window
         var rows = (_page == 2 ? l.OrderByDescending(v => v.Watch.LastWatchedAt ?? v.FileState.At ?? 0) : l.OrderByDescending(v => v.Meta.AddedAt ?? 0))
             .Select(v => new LibRow(v)).ToList();
         Cards.ItemTemplate = (DataTemplate)FindResource(_page == 1 ? "ShortCard" : "VideoCard");
-        Cards.ItemsSource = rows;
+        var filterKey = $"{_page}|{chip}|{q}";
+        if (_libraryFilter != filterKey) { _libraryPage = 0; _libraryFilter = filterKey; }
+        _libraryCount = rows.Count;
+        _libraryPage = Math.Clamp(_libraryPage, 0, Math.Max(0, (rows.Count - 1) / 60));
+        Cards.ItemsSource = rows.Skip(_libraryPage * 60).Take(60).ToList();
+        LibraryPage.Text = $"{_libraryPage + 1} / {Math.Max(1, (rows.Count + 59) / 60)} · {rows.Count} видео";
         EmptyCards.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyBtn.Visibility = Lib.Mounts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyText.Text = Lib.Mounts.Count == 0 ? "Подключите флешку или папку с видео — например ту, куда качает YTDLnis."
@@ -260,8 +270,26 @@ public partial class MainWindow : Window
     /// Show what was watched and offer to clear it and pick new videos: by itself once per session and storage,
     /// and any time from «Убрать просмотренные» (<paramref name="asked"/>).
     /// </summary>
+    async void OnRefreshContent(object sender, RoutedEventArgs e)
+    {
+        if (Downloader.Running) { Status("Сначала поставьте загрузки на паузу."); return; }
+        var m = Target.SelectedItem as Mount ?? Lib.Mounts.FirstOrDefault(x => x.Online);
+        if (m == null) { Status("Подключите носитель."); return; }
+        await RefreshAll();
+        var stale = Lib.Stale(m);
+        if (stale.Count == 0) { Status("Нет непросмотренных видео старше 30 дней. Начатое, понравившееся и защищённое сохраняется."); return; }
+        var window = new CleanupWindow(m, stale, stale: true) { Owner = this };
+        if (window.ShowDialog() != true) return;
+        var selected = window.ToDelete;
+        var result = await Task.Run(() => Lib.DeleteWatched(m, selected, replaceStale: true));
+        Status($"Удалено {result.Count}, освобождено {Ui.Gb(result.Bytes)}");
+        await RefreshAll();
+        if (window.Choice == 2) { Target.SelectedItem = m; OnPick(sender, e); }
+    }
+
     async Task OfferCleanup(bool asked = false)
     {
+        if (Downloader.Running) { if (asked) Status("Сначала поставьте загрузки на паузу."); return; }
         if (asked && Lib.Mounts.Where(m => m.Online).All(m => Lib.Watched(m).Count == 0)) { Status("Просмотренных видео на подключённых носителях нет"); return; }
         foreach (var m in Lib.Mounts.Where(m => m.Online).ToList())
         {
@@ -271,7 +299,8 @@ public partial class MainWindow : Window
             var w = new CleanupWindow(m, watched) { Owner = this };
             w.ShowDialog();
             if (w.Choice == 0) continue;
-            var (n, bytes) = Lib.DeleteWatched(m, w.ToDelete);
+            var chosen = w.ToDelete;
+            var (n, bytes) = await Task.Run(() => Lib.DeleteWatched(m, chosen));
             Status($"Удалено {n} просмотренных видео, освобождено {Ui.Gb(bytes)}");
             await RefreshAll();
             if (w.Choice == 2)
@@ -373,6 +402,13 @@ public partial class MainWindow : Window
         foreach (var r in Downloader.Rows.Where(r => r.Item.Include && r.Item.Status == Q.Failed)) { r.Item = r.Item with { Status = Q.Pending }; r.Progress = ""; }
         Downloader.Changed();
         await RunQueue();
+    }
+
+    void OnCancelAll(object sender, RoutedEventArgs e)
+    {
+        Downloader.CancelAll();
+        if (!Downloader.Running) { foreach (var r in Downloader.Rows.Where(r => r.Item.Status != Q.Done).ToList()) Downloader.Rows.Remove(r); Downloader.Changed(); }
+        Status("Загрузки отменены. Уже скачанные видео сохранены.");
     }
 
     void OnStop(object sender, RoutedEventArgs e) { Downloader.Stop(); Status("Пауза. Недокачанное продолжится с того же места — нажмите «Скачать»"); }

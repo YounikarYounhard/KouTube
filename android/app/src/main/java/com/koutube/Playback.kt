@@ -27,6 +27,9 @@ object Playback {
     val player: ExoPlayer by lazy {
         ExoPlayer.Builder(App.instance, DefaultRenderersFactory(App.instance).setEnableDecoderFallback(true))
             .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000)
+            .setLoadControl(androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                .setBufferDurationsMs(15_000, 30_000, 1_000, 2_000)
+                .setTargetBufferBytes(32 * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build())
             .setHandleAudioBecomingNoisy(true)
             // a call or another player pauses us; the CPU and Wi-Fi stay awake while sound plays with the screen off
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
@@ -71,7 +74,7 @@ object Playback {
 
     /** Press-and-hold: 2x while the finger is down, then back to whatever speed was set. */
     fun hold2x(on: Boolean) {
-        if (on) { heldSpeed = player.playbackParameters.speed; player.setPlaybackSpeed(2f) }
+        if (on) { if (heldSpeed == null) heldSpeed = player.playbackParameters.speed; player.setPlaybackSpeed(2f) }
         else { heldSpeed?.let { player.setPlaybackSpeed(it) }; heldSpeed = null }
     }
 
@@ -80,13 +83,18 @@ object Playback {
     }
 
     fun play(list: List<Video>, start: Video) {
+        current.value?.let { save(it, player.currentPosition) }
+        hold2x(false)
         val q = list.filter { it.present }.ifEmpty { listOf(start) }
         val i = q.indexOfFirst { it.key == start.key }.coerceAtLeast(0)
         error.value = null
         minimized.value = false
         queue.value = q
-        becomeCurrent(q[i])
+        current.value = null
         player.setMediaItems(q.map(::item), i, resumePos(q[i]))
+        if (current.value == null) becomeCurrent(q[i])
+        player.pauseAtEndOfMediaItems = !Lib.settings.value.autoplay
+        setSubtitles(Lib.settings.value.defaultSubtitles)
         player.prepare()
         player.play()
         runCatching { App.instance.startService(Intent(App.instance, PlaybackService::class.java)) }   // notification controls
@@ -104,6 +112,20 @@ object Playback {
         queue.value = emptyList()
         App.instance.stopService(Intent(App.instance, PlaybackService::class.java))
         Lib.flushAll()
+    }
+
+    /** Recreate decoder state without rebooting the app, keeping position and play/pause. */
+    fun repairSync() {
+        if (current.value == null) return
+        val index = player.currentMediaItemIndex
+        val pos = player.currentPosition
+        val playing = player.playWhenReady
+        hold2x(false)
+        player.stop()
+        player.seekTo(index, pos)
+        player.prepare()
+        player.playWhenReady = playing
+        error.value = null
     }
 
     fun restart() { player.seekTo(0); resumedAt.value = null }
@@ -279,7 +301,7 @@ object Playback {
         sleepJob?.cancel()
         sleepJob = null
         player.volume = 1f
-        player.pauseAtEndOfMediaItems = false
+        player.pauseAtEndOfMediaItems = !Lib.settings.value.autoplay
         sleepEndsAt.value = null
         dimmed.value = false
     }

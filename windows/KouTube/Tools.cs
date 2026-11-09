@@ -88,20 +88,22 @@ public static class Tools
         return p;
     }
 
-    public static (int Code, string Out, string Err) Run(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null)
+    public static (int Code, string Out, string Err) Run(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null, CancellationToken ct = default)
     {
         var si = Start(exe, args);
         if (cwd != null) si.WorkingDirectory = cwd;
         using var p = Process.Start(si)!;
+        using var cancel = ct.Register(() => { try { p.Kill(true); } catch (Exception) { } });
         var err = p.StandardError.ReadToEndAsync();
         var o = p.StandardOutput.ReadToEndAsync();
         if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch (Exception) { } }
+        ct.ThrowIfCancellationRequested();
         return (p.HasExited ? p.ExitCode : -1, o.Result, err.Result);
     }
 
-    public static JsonElement Json(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null)
+    public static JsonElement Json(string exe, IEnumerable<string> args, int timeoutMs = 120_000, string? cwd = null, CancellationToken ct = default)
     {
-        var (code, o, e) = Run(exe, args, timeoutMs, cwd);
+        var (code, o, e) = Run(exe, args, timeoutMs, cwd, ct);
         // a yt-dlp list whose later page fails (YouTube answers 500 on hashtag pages) still prints what it got: keep it
         if (code != 0 && !(exe == YtDlp && o.TrimStart().StartsWith('{')) || string.IsNullOrWhiteSpace(o)) throw new IOException(LastLine(e) ?? $"код {code}");
         return JsonDocument.Parse(o).RootElement.Clone();
