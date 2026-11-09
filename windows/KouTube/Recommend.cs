@@ -116,9 +116,21 @@ public static class Recommend
         return s;
     }
 
+    // Keep history intact; only the training view forgets signals older than the reset.
+    public static List<Video> TrainingVideos(List<Video> all, long since) => since <= 0 ? all : all.Select(v => v with
+    {
+        Item = v.Item with
+        {
+            Watch = v.Watch.Ts > since ? v.Watch : new Watch(),
+            Flags = v.Flags.Ts > since ? v.Flags : v.Flags with { Rating = 0 },
+            File = v.FileState.Ts > since ? v.FileState : new FileState()
+        }
+    }).Where(v => v.Meta.AddedAt > since || v.Watch.Ts > since || v.Flags.Rating != 0 || v.FileState.Ts > since).ToList();
+
     /// <summary>The library, plus (signed in) what you watched on YouTube — each a smaller "yes" than a video you finished here.</summary>
     public static Interests Learn(List<Video> all, List<Account.Watched>? yt = null, List<Account.Channel>? subs = null)
     {
+        all = TrainingVideos(all, Lib.Config.RecommendationsResetAt);
         var ch = new Dictionary<string, double>();
         var counts = new Dictionary<string, (int, int, int)>();
         var words = new Dictionary<string, double>();

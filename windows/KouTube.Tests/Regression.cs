@@ -32,6 +32,14 @@ static class Regression
         check(PickIntent.Topics("Мне для мамы надо видео про кухню, путешествия и сад и т.д.").SequenceEqual(new[] { "кухню", "путешествия", "сад" }), "request splits into editable topics");
         var mount = new Mount(new StorageRef("test", "test", "test"));
         var old = new Video("x", mount, new Item { Meta = new Meta { AddedAt = Format.Now() - 40L * 86400_000 } }, new Found("x", "x", 1, DateTime.UtcNow, [], null));
+        var reset = new Config { Keywords = ["space"], Linked = ["x"], NotInterested = [new Nope("x", "title", "channel")], Seen = ["seen"], Exclude = ["phonk"] }.ResetRecommendations(100);
+        check(reset.Keywords.Count + reset.Linked.Count + reset.NotInterested.Count == 0 && reset.RecommendationsResetAt == 100, "reset clears learned preferences and search topics");
+        check(reset.Seen.SequenceEqual(new[] { "seen" }) && reset.Exclude.SequenceEqual(new[] { "phonk" }), "reset retains watched exclusions and blocked words");
+        var training = old with { Item = old.Item with { Meta = old.Meta with { AddedAt = 1 }, Watch = new Watch { Ts = 50, Status = Watch.Finished }, Flags = new Flags { Ts = 50, Rating = 1 } } };
+        check(Recommend.TrainingVideos([training], 100).Count == 0 && training.Watch.Status == Watch.Finished, "reset ignores old training without deleting history");
+        var recent = training with { Item = training.Item with { Watch = training.Watch with { Ts = 101 } } };
+        var learned = Recommend.TrainingVideos([recent], 100).Single();
+        check(learned.Watch.Status == Watch.Finished && learned.Flags.Rating == 0, "new watch trains again without reviving old rating");
         check(Lib.StaleUnwatched(old, Format.Now()), "old never-watched file can be proposed for replacement");
         check(!Lib.StaleUnwatched(old with { Item = old.Item with { Flags = new Flags { Keep = true } } }, Format.Now()), "protected file never proposed");
         check(!Lib.StaleUnwatched(old with { Item = old.Item with { Watch = new Watch { LastWatchedAt = 1 } } }, Format.Now()), "any watch excludes replacement");

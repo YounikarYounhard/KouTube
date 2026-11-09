@@ -459,6 +459,15 @@ public partial class MainWindow : Window
         if (SelectedStorage is { } m) ReserveGb.Text = (m.Storage.Budget.ReserveBytes / (double)(1L << 30)).ToString("0.#");
     }
 
+    void OnResetRecommendations(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(this,
+            "Сбросить предпочтения KouTube, отклонённые предложения, темы, каналы и фильтры давности/длительности подборки?\n\nВидео, история, оценки, очередь загрузок, добавленные ссылки и слова-исключения сохранятся. Старые оценки и просмотры перестанут обучать подборку на этом ПК.\n\nИстория и рекомендации подключённого YouTube продолжат учитываться. Для поиска только по словам отключите аккаунт в подборке.",
+            "Сброс рекомендаций", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+        Lib.Update(c => c.ResetRecommendations(Format.Now()));
+        Status("Рекомендации KouTube сброшены. Новые действия снова будут обучать подборку.");
+    }
+
     void OnSaveSettings(object sender, RoutedEventArgs e)
     {
         var codecs = new List<string>();

@@ -108,6 +108,12 @@ public record Config
     public bool FillAll { get; init; } = true;
     /// <summary>Take videos from «Смотреть позже» too. Off: many keep there what they watched long ago.</summary>
     public bool UseWatchLater { get; init; }
+    public long RecommendationsResetAt { get; init; }
+    public Config ResetRecommendations(long now) => this with
+    {
+        RecommendationsResetAt = now, NotInterested = [], Linked = [], Sources = [], Keywords = [],
+        PickDuration = "auto", MinAgeDays = null, MaxAgeDays = null
+    };
     public string PickDuration { get; init; } = "auto";
     public string AccountProfile { get; init; } = "default";
     public List<string> AccountProfiles { get; init; } = ["default"];

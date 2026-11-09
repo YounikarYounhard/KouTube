@@ -362,6 +362,10 @@
                         <TextBlock Text="(0 — не качать, максимум 1000; весят копейки)" VerticalAlignment="Center" Opacity="0.7" />
                     </StackPanel>
 
+                    <TextBlock Text="Рекомендации" FontSize="20" FontWeight="SemiBold" Margin="0,24,0,6" />
+                    <Button Content="Сбросить рекомендации" HorizontalAlignment="Left" Click="OnResetRecommendations" />
+                    <TextBlock Text="Сброс предпочтений KouTube и тем подборки. Видео и история сохранятся. Подключённый YouTube продолжит влиять на подборку." TextWrapping="Wrap" Opacity="0.7" Margin="0,6,0,0" />
+
                     <TextBlock Text="Прочее" FontSize="20" FontWeight="SemiBold" Margin="0,24,0,6" />
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="Временная папка загрузок:" VerticalAlignment="Center" />
