@@ -10,9 +10,26 @@ namespace KouTube;
 public partial class MainWindow : Window
 {
     /// <summary>A card; pictures load only when the card is actually on screen.</summary>
-    public sealed class LibRow(Video v)
+    public sealed class LibRow(Video v, bool deferImages = false) : System.ComponentModel.INotifyPropertyChanged
     {
         ImageSource? _cover, _avatar; bool _c, _a;
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+        public void ReadImages()
+        {
+            _cover = Load(CoverFile, 320);
+            _avatar = Load(AvatarFile, 72);
+        }
+
+        public void ImagesReady()
+        {
+            _c = _a = true;
+            foreach (var property in new[] { nameof(Cover), nameof(Avatar), nameof(AvatarVisible) })
+                PropertyChanged?.Invoke(this, new(property));
+        }
+
+        string? CoverFile => V.Found?.Thumb ?? (V.Meta.Thumb != null ? Path.Combine(V.Mount.Ml, V.Meta.Thumb) : null);
+        string? AvatarFile => V.Meta.Avatar != null ? Path.Combine(V.Mount.Ml, V.Meta.Avatar) : null;
         static readonly Color[] Palette = [Color.FromRgb(0x5C, 0x6B, 0xC0), Color.FromRgb(0x26, 0xA6, 0x9A), Color.FromRgb(0xEF, 0x6C, 0x00), Color.FromRgb(0x8E, 0x24, 0xAA),
             Color.FromRgb(0x43, 0xA0, 0x47), Color.FromRgb(0xD8, 0x1B, 0x60), Color.FromRgb(0x1E, 0x88, 0xE5), Color.FromRgb(0x6D, 0x4C, 0x41)];
 
@@ -35,8 +52,9 @@ public partial class MainWindow : Window
         {
             get
             {
-                if (_c) return _cover; _c = true;
-                return _cover = Load(V.Found?.Thumb ?? (V.Meta.Thumb != null ? Path.Combine(V.Mount.Ml, V.Meta.Thumb.Replace('/', '\\')) : null), 320);
+                if (_c || deferImages) return _cover;
+                _c = true;
+                return _cover = Load(CoverFile, 320);
             }
         }
 
@@ -44,8 +62,9 @@ public partial class MainWindow : Window
         {
             get
             {
-                if (_a) return _avatar; _a = true;
-                return _avatar = V.Meta.Avatar != null ? Load(Path.Combine(V.Mount.Ml, V.Meta.Avatar.Replace('/', '\\')), 72) : null;
+                if (_a || deferImages) return _avatar;
+                _a = true;
+                return _avatar = Load(AvatarFile, 72);
             }
         }
 
@@ -87,6 +106,18 @@ public partial class MainWindow : Window
 
     List<Video> _all = [];
     int _page;
+    int _picturePage;
+
+    async Task LoadLibraryImages(List<LibRow> page, int pageNumber)
+    {
+        foreach (var row in page)
+        {
+            if (pageNumber != _picturePage) return;
+            await Task.Run(row.ReadImages);
+            if (pageNumber != _picturePage) return;
+            row.ImagesReady();
+        }
+    }
     readonly Dictionary<int, string> _chip = new() { [0] = "all", [1] = "all", [2] = "watched" };
 
     public MainWindow()
@@ -97,7 +128,10 @@ public partial class MainWindow : Window
         Downloader.OnChanged += () => Ui.OnUi(UpdatePlan);
         // the summary panel follows the running download twice a second
         var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        t.Tick += (_, _) => { if (Downloader.Running || _page == 3) UpdateSummary(); };
+        t.Tick += (_, _) => {
+            Downloader.Checkpoint();
+            if (Downloader.Running || _page == 3) UpdateSummary();
+        };
         t.Start();
         foreach (var (k, n) in SbCats) SbPanel.Children.Add(new CheckBox { Content = n, Tag = k, Margin = new Thickness(0, 4, 18, 4), MinWidth = 260 });
         LoadSettingsUi();
@@ -194,7 +228,9 @@ public partial class MainWindow : Window
             2 => l,
             _ => l.Where(v => !v.IsShort && v.Present),
         };
-        var dupIds = _all.Where(v => v.Present && v.Meta.YtId != null).GroupBy(v => v.Meta.YtId).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
+        var dupIds = chip == "dups"
+            ? _all.Where(v => v.Present && v.Meta.YtId != null).GroupBy(v => v.Meta.YtId).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet()
+            : [];
         l = chip switch
         {
             "new" => l.Where(v => v.Watch.Status == Watch.New),
@@ -207,21 +243,23 @@ public partial class MainWindow : Window
             _ => l,
         };
         if (q.Length > 0) l = l.Where(v => new[] { v.Title, v.Meta.Channel, v.Meta.Category }.Any(s => s != null && Format.UnFullwidth(s).ToLowerInvariant().Contains(q)));
-        var rows = (_page == 2 ? l.OrderByDescending(v => v.Watch.LastWatchedAt ?? v.FileState.At ?? 0) : l.OrderByDescending(v => v.Meta.AddedAt ?? 0))
-            .Select(v => new LibRow(v)).ToList();
+        var rows = (_page == 2 ? l.OrderByDescending(v => v.Watch.LastWatchedAt ?? v.FileState.At ?? 0) :
+            l.OrderByDescending(v => v.Meta.AddedAt ?? 0)).ToList();
         Cards.ItemTemplate = (DataTemplate)FindResource(_page == 1 ? "ShortCard" : "VideoCard");
         var filterKey = $"{_page}|{chip}|{q}";
         if (_libraryFilter != filterKey) { _libraryPage = 0; _libraryFilter = filterKey; }
         _libraryCount = rows.Count;
         _libraryPage = Math.Clamp(_libraryPage, 0, Math.Max(0, (rows.Count - 1) / 60));
-        Cards.ItemsSource = rows.Skip(_libraryPage * 60).Take(60).ToList();
+        var pageRows = rows.Skip(_libraryPage * 60).Take(60).Select(v => new LibRow(v, deferImages: true)).ToList();
+        Cards.ItemsSource = pageRows;
+        _ = LoadLibraryImages(pageRows, ++_picturePage);
         LibraryPage.Text = $"{_libraryPage + 1} / {Math.Max(1, (rows.Count + 59) / 60)} · {rows.Count} видео";
         EmptyCards.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyBtn.Visibility = Lib.Mounts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyText.Text = Lib.Mounts.Count == 0 ? "Подключите флешку или папку с видео — например ту, куда качает YTDLnis."
             : q.Length > 0 ? "Ничего не нашлось" : _page == 1 ? "Shorts пока нет. Нажмите «Подборка», чтобы подобрать." : "Здесь пока пусто. Нажмите «Подборка», чтобы подобрать видео.";
-        StorageText.Text = string.Join("   ·   ", Lib.Mounts.Select(m => m.Online && m.Space() is { } s
-            ? $"{m.Name}: {m.Docs.Count} видео, свободно {Ui.Gb(s.Free)} из {Ui.Gb(s.Total)}" : $"{m.Name}: {m.Error ?? "не подключено"}"));
+        StorageText.Text = string.Join("   ·   ", Lib.Mounts.Select(m => m.Online
+            ? $"{m.Name}: {m.Docs.Count} видео" : $"{m.Name}: {m.Error ?? "не подключено"}"));
     }
 
     void OnFilter(object sender, RoutedEventArgs e)
@@ -276,12 +314,13 @@ public partial class MainWindow : Window
         var m = Target.SelectedItem as Mount ?? Lib.Mounts.FirstOrDefault(x => x.Online);
         if (m == null) { Status("Подключите носитель."); return; }
         await RefreshAll();
-        var stale = Lib.Stale(m);
+        var stale = Lib.Stale(m, includePlaylistVideos: true);
         if (stale.Count == 0) { Status("Нет непросмотренных видео старше 30 дней. Начатое, понравившееся и защищённое сохраняется."); return; }
         var window = new CleanupWindow(m, stale, stale: true) { Owner = this };
         if (window.ShowDialog() != true) return;
         var selected = window.ToDelete;
-        var result = await Task.Run(() => Lib.DeleteWatched(m, selected, replaceStale: true));
+        var allowPlaylistFiles = window.PlaylistFilesAllowed;
+        var result = await Task.Run(() => Lib.DeleteWatched(m, selected, replaceStale: true, includePlaylistVideos: allowPlaylistFiles));
         Status($"Удалено {result.Count}, освобождено {Ui.Gb(result.Bytes)}");
         await RefreshAll();
         if (window.Choice == 2) { Target.SelectedItem = m; OnPick(sender, e); }
@@ -290,17 +329,18 @@ public partial class MainWindow : Window
     async Task OfferCleanup(bool asked = false)
     {
         if (Downloader.Running) { if (asked) Status("Сначала поставьте загрузки на паузу."); return; }
-        if (asked && Lib.Mounts.Where(m => m.Online).All(m => Lib.Watched(m).Count == 0)) { Status("Просмотренных видео на подключённых носителях нет"); return; }
+        if (asked && Lib.Mounts.Where(m => m.Online).All(m => Lib.Watched(m, includePlaylistVideos: true).Count == 0)) { Status("Просмотренных видео на подключённых носителях нет"); return; }
         foreach (var m in Lib.Mounts.Where(m => m.Online).ToList())
         {
             if (!_offered.Add(m.Ref.StorageId) && !asked) continue;
-            var watched = Lib.Watched(m);
+            var watched = Lib.Watched(m, includePlaylistVideos: true);
             if (watched.Count == 0) continue;
             var w = new CleanupWindow(m, watched) { Owner = this };
             w.ShowDialog();
             if (w.Choice == 0) continue;
             var chosen = w.ToDelete;
-            var (n, bytes) = await Task.Run(() => Lib.DeleteWatched(m, chosen));
+            var allowPlaylistFiles = w.PlaylistFilesAllowed;
+            var (n, bytes) = await Task.Run(() => Lib.DeleteWatched(m, chosen, includePlaylistVideos: allowPlaylistFiles));
             Status($"Удалено {n} просмотренных видео, освобождено {Ui.Gb(bytes)}");
             await RefreshAll();
             if (w.Choice == 2)
@@ -330,11 +370,12 @@ public partial class MainWindow : Window
 
     void UpdatePlan()
     {
-        var plans = Lib.Mounts.Where(m => Downloader.Rows.Any(r => r.Item.StorageId == m.Ref.StorageId && r.Item.Include && r.Item.Status == Q.Pending))
+        var plans = Downloader.Running ? [] : Lib.Mounts.Where(m => Downloader.Rows.Any(r => r.Item.StorageId == m.Ref.StorageId && r.Item.Include && r.Item.Status == Q.Pending))
             .Select(m => (m, Downloader.Check(m))).ToList();
         PlanText.Text = plans.Count == 0 ? (Downloader.Rows.Count == 0 ? "Очередь пуста. Нажмите «Подборка» или вставьте ссылку." : "В очереди нечего качать.")
             : string.Join("\n", plans.Select(p => $"{p.m.Name}: {p.Item2.Text}"));
         // the theme's own text colour when all is well (the system "control text" is black even on the dark theme)
+        if (Downloader.Running) PlanText.Text = "Загрузки выполняются. Свободное место проверяется перед записью каждого файла.";
         if (plans.Any(p => !p.Item2.Ok)) PlanText.Foreground = Brushes.IndianRed; else PlanText.ClearValue(TextBlock.ForegroundProperty);
         ConfirmBtn.IsEnabled = !Downloader.Running && plans.Count > 0 && plans.All(p => p.Item2.Ok);
         StopBtn.IsEnabled = Downloader.Running;
@@ -450,6 +491,9 @@ public partial class MainWindow : Window
         PreciseCuts.IsChecked = c.PreciseCuts;
         TempDir.Text = Lib.TempDir;
         CommentsN.Text = c.Comments.ToString();
+        ShortComments.IsChecked = c.ShortComments;
+        CommentReplies.IsChecked = c.CommentReplies;
+        FallbackApi.Text = c.FallbackApi ?? "";
     }
 
     Mount? SelectedStorage => StorageList.SelectedIndex >= 0 && StorageList.SelectedIndex < Lib.Mounts.Count ? Lib.Mounts[StorageList.SelectedIndex] : null;
@@ -475,8 +519,14 @@ public partial class MainWindow : Window
         if (CodecVp9.IsChecked == true) codecs.Add("vp09");
         if (CodecH264.IsChecked == true) codecs.Add("avc1");
         if (codecs.Count == 0) { Status("Нужен хотя бы один формат"); return; }
+        var fallback = FallbackApi.Text.Trim();
+        if (fallback.Length > 0 && FallbackDownload.Endpoint(fallback) == null)
+        { Status("В резервном сервере укажите HTTPS адрес API без логина, пароля и параметров."); return; }
         Lib.Update(c => c with
         {
+            FallbackApi = fallback.Length == 0 ? null : fallback,
+            ShortComments = ShortComments.IsChecked == true,
+            CommentReplies = CommentReplies.IsChecked == true,
             Profile = c.Profile with { MaxShortSide = MaxRes.SelectedIndex switch { 0 => 480, 2 => 1080, _ => 720 }, Codecs = codecs, MaxFps = Fps60.IsChecked == true ? 60 : 30 },
             SubLangs = SubLangs.Text.Split(',', ' ').Select(s => s.Trim()).Where(s => s.Length > 0).ToList(),
             AutoSubs = AutoSubs.IsChecked == true,

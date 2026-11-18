@@ -4,6 +4,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FeedAccessTest {
+    @Test fun playlistRemovalWinsWithoutClearingARemoteEditForAnotherList() {
+        val add = RemoteEdit("s", "k", playlists = mapOf("a" to PlaylistEntry(4, "Music"), "b" to PlaylistEntry(3, "Clips")))
+        val remove = RemoteEdit("s", "k", playlists = mapOf("a" to PlaylistEntry(5)))
+        val marks = mergeRemoteEdit(remove, add).playlists.orEmpty()
+        assertNull(marks.getValue("a").name)
+        assertEquals("Clips", marks.getValue("b").name)
+    }
+
+    @Test fun relatedVideosPreferTopicOverChannelAndHideFinished() {
+        fun video(id: String, title: String, channel: String, finished: Boolean = false) = Video(
+            id, "s", Item(meta = Meta(title = title, channel = channel),
+                watch = Watch(status = if (finished) Watch.FINISHED else Watch.NEW)), null, remotePresent = true
+        )
+        val current = video("now", "Выживание в Майнкрафте", "Канал A")
+        val related = video("related", "Строим ферму в Майнкрафте", "Канал B")
+        val sameChannel = video("unrelated", "Ремонт кресла", "Канал A")
+        val watched = video("watched", "Выживание в Майнкрафте", "Канал A", finished = true)
+        assertEquals(listOf(related, sameChannel), recommended(current, listOf(sameChannel, watched, related, current)))
+    }
+
     @Test fun failedRetryCannotReplaceNewerProgress() {
         val newer = RemoteEdit("s", "key", watch = Watch(ts = 20, posMs = 120_000), flags = Flags(ts = 3, rating = 1))
         val retry = RemoteEdit("s", "key", watch = Watch(ts = 10, posMs = 30_000))

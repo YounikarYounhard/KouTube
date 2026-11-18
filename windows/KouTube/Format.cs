@@ -39,12 +39,15 @@ public record Meta
     /// <summary>Top comments inside .koutube, e.g. comments/&lt;id&gt;.json, and how many the video has in total.</summary>
     public string? Comments { get; init; }
     public long? CommentCount { get; init; }
+    public string? ChannelId { get; init; }
+    public long? ViewCount { get; init; }
+    public long? LikeCount { get; init; }
     /// <summary>YouTube's tags for the video: phones find a topic by them ("путешествие").</summary>
     public List<string>? Tags { get; init; }
 }
 
 /// <summary>One comment as stored in .koutube/comments: author, text, likes, time, pinned, by the channel itself.</summary>
-public record Comment(string A, string T, long L = 0, long? Ts = null, bool P = false, bool U = false);
+public record Comment(string A, string T, long L = 0, long? Ts = null, bool P = false, bool U = false, string? Id = null, string? Parent = null);
 
 public record Watch
 {
@@ -76,12 +79,15 @@ public record Flags
     public int Rating { get; init; }
 }
 
+public record PlaylistEntry(long Ts, string? Name = null, long? Order = null);
+
 public record Item
 {
     public Meta? Meta { get; init; }
     public Watch? Watch { get; init; }
     public FileState? File { get; init; }
     public Flags? Flags { get; init; }
+    public Dictionary<string, PlaylistEntry>? Playlists { get; init; }
 }
 
 public record Decoder(string Mime, bool Hw, int MaxW, int MaxH);
@@ -181,9 +187,20 @@ public static class Format
                 {
                     Meta = Newer(a.Meta, b.Meta, x => x.Ts), Watch = Newer(a.Watch, b.Watch, x => x.Ts),
                     File = Newer(a.File, b.File, x => x.Ts), Flags = Newer(a.Flags, b.Flags, x => x.Ts),
+                    Playlists = MergePlaylists(a.Playlists, b.Playlists),
                 };
             }
         return o;
+    }
+
+    static Dictionary<string, PlaylistEntry>? MergePlaylists(Dictionary<string, PlaylistEntry>? a, Dictionary<string, PlaylistEntry>? b)
+    {
+        if (a == null) return b;
+        if (b == null) return a;
+        var result = new Dictionary<string, PlaylistEntry>(a);
+        foreach (var (id, entry) in b)
+            if (!result.TryGetValue(id, out var before) || entry.Ts >= before.Ts) result[id] = entry;
+        return result;
     }
 
     static T? Newer<T>(T? a, T? b, Func<T, long> ts) where T : class =>

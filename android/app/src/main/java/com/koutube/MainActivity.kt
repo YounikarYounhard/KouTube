@@ -70,8 +70,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        // left the app (Home, another app): coming back asks the mode again — unless a video is open (back to it, or the small window)
-        if (Playback.current.value == null) Lib.roleChosen.value = false
         // older Android has no auto-enter: ask for the window ourselves, and only for a playing video (paused = no window)
         if (hasPip && Build.VERSION.SDK_INT < 31 && Playback.current.value != null && Playback.player.isPlaying)
             runCatching { enterPictureInPictureMode(pipParams()) }
@@ -79,7 +77,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Playback.current.value == null) Lib.roleChosen.value = false          // every opening of the app asks the mode
         enableEdgeToEdge()
         if (hasPip) {
             ContextCompat.registerReceiver(this, pipButtons, IntentFilter().apply { addAction(PLAY); addAction(PREV); addAction(NEXT) }, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -100,7 +97,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); if (Playback.current.value == null) Lib.newFeed(); Lib.refresh() }
+    override fun onResume() { super.onResume(); if (Playback.current.value == null) Lib.newFeed(); Lib.refresh(force = Lib.isClient) }
 
     // Leaving the app is a checkpoint: whatever changed goes to the stick now. The sound goes on in the
     // background (another app, screen off) — pause it from the notification or the lock screen.

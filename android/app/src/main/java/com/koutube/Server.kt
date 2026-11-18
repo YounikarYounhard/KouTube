@@ -40,7 +40,15 @@ import kotlin.concurrent.thread
 @Serializable data class RemoteLibrary(val serverName: String, val items: List<RemoteItem>)
 @Serializable data class PairRequest(val code: String, val deviceId: String, val name: String)
 @Serializable data class PairReply(val token: String, val serverName: String)
-@Serializable data class RemoteEdit(val storageId: String, val key: String, val watch: Watch? = null, val flags: Flags? = null, val delete: Boolean = false)
+@Serializable data class RemoteEdit(val storageId: String, val key: String, val watch: Watch? = null, val flags: Flags? = null,
+    val delete: Boolean = false, val playlists: Map<String, PlaylistEntry>? = null) {
+    fun validPlaylists() = playlists.orEmpty().run {
+        size <= 50 && all { (id, mark) ->
+            id.length in 1..150 && id.all { it.isLetterOrDigit() || it == '-' || it == '_' } &&
+                mark.ts > 0 && (mark.name == null || mark.name.length in 1..120)
+        }
+    }
+}
 
 /**
  * The phone with the stick as a server for a tablet on the same Wi-Fi (or the phone's hotspot).
@@ -55,6 +63,7 @@ object Server {
     val running = MutableStateFlow(false)
     val code = MutableStateFlow("")
     val devices = MutableStateFlow<Map<String, String>>(emptyMap())      // token → device name
+    val networkAddresses = MutableStateFlow<List<String>>(emptyList())
     val port = MutableStateFlow(PORT)
     val access = MutableStateFlow<Map<String, List<ShareFolder>>>(emptyMap())
     private var identities = emptyMap<String, String>()
@@ -122,7 +131,7 @@ object Server {
         runCatching { ss.bind(InetSocketAddress(PORT)) }.onFailure { ss.bind(InetSocketAddress(0)) }   // 8790 taken: any free port, NSD tells the tablet
         socket = ss
         port.value = ss.localPort
-        lastRequest = System.currentTimeMillis()
+        lastRequest = android.os.SystemClock.elapsedRealtime()
         running.value = true
         thread(name = "koutube-server") {
             while (!ss.isClosed) {
@@ -135,30 +144,53 @@ object Server {
                 }
             }
         }
-        thread(name = "koutube-idle") {
+        networkAddresses.value = addresses()
+        register(service)
+        thread(name = "koutube-network") {
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
             while (!ss.isClosed) {
-                Thread.sleep(60_000)
-                if (open.get() == 0 && System.currentTimeMillis() - lastRequest > 30 * 60_000) { service.stopSelf(); break }
+                Thread.sleep(5_000)
+                main.post {
+                    if (ss.isClosed) return@post
+                    val current = addresses()
+                    if (current != networkAddresses.value || nsd == null) {
+                        networkAddresses.value = current
+                        unregister(service)
+                        register(service)
+                    }
+                    if (Lib.settings.value.stopIdleSharing && open.get() == 0 &&
+                        android.os.SystemClock.elapsedRealtime() - lastRequest > 30 * 60_000) {
+                        Lib.updateSettings { it.copy(shareWifi = false) }
+                        service.stopSelf()
+                    }
+                }
             }
         }
-        register(service)
     }
 
     internal fun shutdown(ctx: Context) {
         runCatching { socket?.close() }
         clients.forEach { runCatching { it.close() } }
         socket = null
-        nsd?.let { l -> runCatching { (ctx.getSystemService(Context.NSD_SERVICE) as NsdManager).unregisterService(l) } }
-        nsd = null
+        unregister(ctx)
+        networkAddresses.value = emptyList()
         releaseLocks()
         running.value = false
     }
 
+    private fun unregister(ctx: Context) {
+        nsd?.let { l -> runCatching { (ctx.getSystemService(Context.NSD_SERVICE) as NsdManager).unregisterService(l) } }
+        nsd = null
+    }
+
     private fun register(ctx: Context) {
+        if (networkAddresses.value.isEmpty()) return
         val info = NsdServiceInfo().apply { serviceName = "KouTube · ${Lib.deviceName}"; serviceType = TYPE; port = this@Server.port.value }
         val l = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(i: NsdServiceInfo) {}
-            override fun onRegistrationFailed(i: NsdServiceInfo, e: Int) {}
+            override fun onRegistrationFailed(i: NsdServiceInfo, e: Int) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post { if (nsd === this) nsd = null }
+            }
             override fun onServiceUnregistered(i: NsdServiceInfo) {}
             override fun onUnregistrationFailed(i: NsdServiceInfo, e: Int) {}
         }
@@ -178,7 +210,10 @@ object Server {
 
     @Synchronized private fun streamEnded(key: String) {
         streams[key]?.let { if (it.decrementAndGet() == 0) streams.remove(key, it) }
-        if (open.decrementAndGet() == 0) releaseLocks()
+        if (open.decrementAndGet() == 0) {
+            lastRequest = android.os.SystemClock.elapsedRealtime()
+            releaseLocks()
+        }
     }
 
     private fun releaseLocks() = synchronized(this) {
@@ -256,7 +291,7 @@ object Server {
         val o = BufferedOutputStream(s.getOutputStream(), 64 * 1024)
         val r = read(i) ?: return
         if (!isLocal(s.inetAddress)) return text(o, 403, "{}")       // never the internet, whatever the router does
-        lastRequest = System.currentTimeMillis()
+        lastRequest = android.os.SystemClock.elapsedRealtime()
         if (r.method == "POST" && r.path == "/pair") return pair(o, r)
         val token = r.headers["x-koutube-token"] ?: r.query["t"]
         if (token == null || token !in devices.value) return text(o, 401, "{}")
@@ -271,13 +306,13 @@ object Server {
             r.method == "GET" && p.size >= 5 && p[1] == "sub" -> sub(o, p[2], p[3], p[4])
             r.method == "POST" && r.path == "/api/edit" -> {
                 val e = json.decodeFromString<RemoteEdit>(String(r.body))
-                if (!allowed(token, e.storageId, e.key) || e.delete) return text(o, 403, "{}")
+                if (!allowed(token, e.storageId, e.key) || e.delete || !e.validPlaylists()) return text(o, 403, "{}")
                 runBlocking { Lib.applyRemote(e).join() }
                 text(o, 200, "{}")
             }
             r.method == "POST" && r.path == "/api/edits" -> {
                 val edits = runCatching { json.decodeFromString<List<RemoteEdit>>(String(r.body)) }.getOrNull() ?: return text(o, 400, "{}")
-                if (edits.size > 100 || edits.any { it.delete || !allowed(token, it.storageId, it.key) }) return text(o, 403, "{}")
+                if (edits.size > 100 || edits.any { it.delete || !it.validPlaylists() || !allowed(token, it.storageId, it.key) }) return text(o, 403, "{}")
                 runBlocking { edits.forEach { Lib.applyRemote(it).join() } }
                 text(o, 200, "{}")
             }

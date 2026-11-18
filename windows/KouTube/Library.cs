@@ -92,6 +92,9 @@ public record Config
     public List<string> Exclude { get; init; } = [];
     /// <summary>Top comments fetched per video (0 = none, up to 1000). They weigh next to nothing.</summary>
     public int Comments { get; init; } = 100;
+    public bool ShortComments { get; init; }
+    public bool CommentReplies { get; init; } = true;
+    public string? FallbackApi { get; init; }
     /// <summary>Channel name → its picture, so each channel is looked up once.</summary>
     public Dictionary<string, string> Avatars { get; init; } = [];
     /// <summary>YouTube IDs the user already watched elsewhere: never picked again.</summary>
@@ -482,22 +485,25 @@ public static class Lib
         if (!m.Online) return;
         var dir = Directory.CreateDirectory(Path.Combine(m.Ml, "avatars")).FullName;
         await Task.Run(() => ShrinkAvatars(dir));
-        var byChannel = m.Merged.Where(e => e.Value.Meta is { Channel: not null, Avatar: null } && m.Docs.ContainsKey(e.Key))
-            .GroupBy(e => e.Value.Meta!.Channel!).ToList();
+        var byChannel = m.Merged.Where(e => e.Value.Meta is { Channel: not null } meta && (meta.Avatar == null || !File.Exists(Path.Combine(m.Ml, meta.Avatar))) && m.Docs.ContainsKey(e.Key))
+            .GroupBy(e => e.Value.Meta!.ChannelId ?? e.Value.Meta.Channel!).ToList();
+        var attempts = 0;
         foreach (var g in byChannel)
         {
             // a channel known here only by its Shorts gets a tiny picture; its first real video brings the full one
             var tiny = g.All(e => e.Value.Meta!.Kind == "short");
-            var file = Config.Avatars.GetValueOrDefault(g.Key);
+            var name = g.First().Value.Meta!.Channel!;
+            var file = Config.Avatars.GetValueOrDefault(name);
             // an empty file (a download cut off) counts as none
             if (file == null || !File.Exists(Path.Combine(dir, file)) || new FileInfo(Path.Combine(dir, file)).Length == 0 || !tiny && file.EndsWith(".s.jpg"))
             {
                 var ytId = g.Select(e => e.Value.Meta!.YtId).FirstOrDefault(i => i != null);
-                if (ytId == null) continue;
-                progress?.Invoke($"Значок канала «{g.Key}»…");
-                file = await Task.Run(() => DownloadAvatar(ytId, dir, tiny));
-                if (file == null) return;                     // YouTube unreachable: try another day
-                Update(c => c with { Avatars = new(c.Avatars) { [g.Key] = file } });
+                if (ytId == null || attempts >= 30) continue;
+                attempts++;
+                progress?.Invoke($"Значок канала «{name}»…");
+                file = await Task.Run(() => DownloadAvatar(ytId, dir, tiny, g.Select(e => e.Value.Meta!.ChannelId).FirstOrDefault(id => id != null)));
+                if (file == null) continue;                     // YouTube unreachable: try another day
+                Update(c => c with { Avatars = new(c.Avatars) { [name] = file } });
             }
             foreach (var (k, item) in g) PutMeta(m, k, item.Meta! with { Avatar = "avatars/" + file });
         }
@@ -510,14 +516,14 @@ public static class Lib
     public static async Task FetchComments(Mount m, Action<string>? progress = null, int perRun = 15)
     {
         if (!m.Online || Config.Comments <= 0) return;
-        var todo = m.Merged.Where(e => e.Value.Meta is { YtId: not null, Comments: null, Kind: not "short" } && m.Docs.ContainsKey(e.Key)).Take(perRun).ToList();
+        var todo = m.Merged.Where(e => e.Value.Meta is { YtId: not null, Comments: null } meta && (meta.Kind != "short" || Config.ShortComments) && m.Docs.ContainsKey(e.Key)).Take(perRun).ToList();
         var n = 0;
         foreach (var (k, item) in todo)
         {
             var meta = item.Meta!;
             progress?.Invoke($"Комментарии: {++n} из {todo.Count}");
             var tmp = Directory.CreateDirectory(Path.Combine(TempDir, "c-" + meta.YtId)).FullName;
-            var r = await Task.Run(() => Tools.Run(Tools.YtDlp, ["--skip-download", "--no-warnings", ..CommentArgs(),
+            var r = await Task.Run(() => Tools.Run(Tools.YtDlp, ["--skip-download", "--no-warnings", ..CommentArgs(meta.Kind == "short"),
                 "-o", Path.Combine(tmp, "%(id)s.%(ext)s"), "https://www.youtube.com/watch?v=" + meta.YtId], 180_000));
             var saved = SaveComments(m, meta.YtId!, tmp);
             try { Directory.Delete(tmp, true); } catch (IOException) { }
@@ -526,8 +532,15 @@ public static class Lib
         }
     }
 
-    public static string[] CommentArgs() => Config.Comments <= 0 ? [] :
-        ["--write-comments", "--write-info-json", "--extractor-args", $"youtube:max_comments={Math.Clamp(Config.Comments, 1, 1000)},all,0,0;comment_sort=top"];
+    public static string[] CommentArgs(bool shorts = false)
+    {
+        if (Config.Comments <= 0 || shorts && !Config.ShortComments) return [];
+        var top = Math.Clamp(Config.Comments, 1, 1000);
+        var replies = Config.CommentReplies ? top : 0;
+        var perThread = Config.CommentReplies ? 3 : 0;
+        return ["--write-comments", "--write-info-json", "--extractor-args",
+            $"youtube:max_comments={top + replies},{top},{replies},{perThread};comment_sort=top"];
+    }
 
     /// <summary>yt-dlp's info.json → a small list in .koutube/comments/&lt;id&gt;.json. Returns its path and the video's total count.</summary>
     public static (string Path, long Count)? SaveComments(Mount m, string ytId, string tmpDir)
@@ -542,8 +555,8 @@ public static class Lib
             string? S(System.Text.Json.JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
             long? L(System.Text.Json.JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number ? v.GetInt64() : null;
             bool B(System.Text.Json.JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.True;
-            var list = cs.EnumerateArray().Where(c => S(c, "parent") is null or "root")
-                .Select(c => new Comment(S(c, "author") ?? "", S(c, "text") ?? "", L(c, "like_count") ?? 0, L(c, "timestamp"), B(c, "is_pinned"), B(c, "author_is_uploader")))
+            var list = cs.EnumerateArray()
+                .Select(c => new Comment(S(c, "author") ?? "", S(c, "text") ?? "", L(c, "like_count") ?? 0, L(c, "timestamp"), B(c, "is_pinned"), B(c, "author_is_uploader"), S(c, "id"), S(c, "parent")))
                 .Where(c => c.T.Length > 0).ToList();
             var dir = Directory.CreateDirectory(Path.Combine(m.Ml, "comments")).FullName;
             File.WriteAllText(Path.Combine(dir, ytId + ".json"), Format.ToJson(list));
@@ -565,15 +578,19 @@ public static class Lib
         }
     }
 
-    static string? DownloadAvatar(string ytId, string dir, bool tiny = false)
+    static string? DownloadAvatar(string? ytId, string dir, bool tiny = false, string? chId = null, CancellationToken ct = default)
     {
         try
         {
-            var v = Tools.Json(Tools.YtDlp, ["-J", "--no-playlist", "--no-warnings", "--skip-download", "https://www.youtube.com/watch?v=" + ytId], 60_000);
-            var chId = v.GetProperty("channel_id").GetString()!;
+            if (chId == null)
+            {
+                var v = Tools.Json(Tools.YtDlp, ["-J", "--no-playlist", "--no-warnings", "--skip-download", "https://www.youtube.com/watch?v=" + ytId], 60_000, ct: ct);
+                chId = v.GetProperty("channel_id").GetString();
+            }
+            if (chId == null || !Regex.IsMatch(chId, @"^UC[A-Za-z0-9_-]{22}$")) return null;
             var name = chId + (tiny ? ".s.jpg" : ".jpg");
             if (File.Exists(Path.Combine(dir, name)) && new FileInfo(Path.Combine(dir, name)).Length > 0) return name;
-            var c = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-items", "0", "--no-warnings", "https://www.youtube.com/channel/" + chId], 60_000);
+            var c = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-items", "0", "--no-warnings", "https://www.youtube.com/channel/" + chId], 30_000, ct: ct);
             var url = c.GetProperty("thumbnails").EnumerateArray()
                 .Where(t => t.TryGetProperty("id", out var id) && id.GetString()?.StartsWith("avatar") == true)
                 .Select(t => t.GetProperty("url").GetString()).FirstOrDefault();
@@ -581,9 +598,11 @@ public static class Lib
             // YouTube's picture server sizes by the "=s900" in the address: 240 px (~20 KB) looks the same as the 983 px original on a card;
             // 48 px for a Shorts-only channel is ~3 KB, unnoticeable that small
             url = Regex.Replace(url, @"=s\d+", tiny ? "=s48" : "=s240");
-            var pic = Http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+            var pic = Http.GetByteArrayAsync(url, ct).GetAwaiter().GetResult();
             if (pic.Length == 0) return null;
-            File.WriteAllBytes(Path.Combine(dir, name), pic);
+            var dest = Path.Combine(dir, name);
+            File.WriteAllBytes(dest + ".tmp", pic);
+            File.Move(dest + ".tmp", dest, true);
             return name;
         }
         catch (Exception) { return null; }
@@ -637,25 +656,55 @@ public static class Lib
 
     // ---------- removing what was watched (the phone never deletes on its own) ----------
 
+    public static void SetPlaylist(Mount m, string key, string id, PlaylistEntry entry)
+    {
+        var current = m.Merged.GetValueOrDefault(key)?.Playlists?.GetValueOrDefault(id);
+        if (current?.Name == entry.Name && current?.Order == entry.Order) return;
+        Edit(m, key, item =>
+        {
+            var marks = item.Playlists == null ? new() : new Dictionary<string, PlaylistEntry>(item.Playlists);
+            marks[id] = entry with { Ts = Format.NextTs(current?.Ts) };
+            return item with { Playlists = marks };
+        });
+    }
+
+    public static void RestorePlaylistEntries(Mount m, string key, string ytId, Dictionary<string, PlaylistEntry>? requested)
+    {
+        var missing = m.Merged.Where(e => e.Key != key && e.Value.Meta?.YtId == ytId && !m.Docs.ContainsKey(e.Key) &&
+            e.Value.Playlists?.Values.Any(x => x.Name != null) == true).ToArray();
+        foreach (var (oldKey, oldItem) in missing)
+            foreach (var (id, mark) in oldItem.Playlists!.Where(x => x.Value.Name != null))
+            {
+                SetPlaylist(m, key, id, mark);
+                SetPlaylist(m, oldKey, id, mark with { Name = null });
+            }
+        foreach (var (id, mark) in requested ?? [])
+            SetPlaylist(m, key, id, mark);
+    }
+
     static bool EverWatched(Watch? w) => w != null && (w.Status != Watch.New || w.PosMs > 0 || w.LastWatchedAt != null || w.FinishedAt != null || !string.IsNullOrEmpty(w.Coverage));
 
-    public static bool StaleUnwatched(Video v, long now) => v.Present && v.Watch.Status == Watch.New
+    public static bool InPlaylist(Video v) => v.Item.Playlists?.Values.Any(entry => entry.Name != null) == true;
+
+    public static bool StaleUnwatched(Video v, long now, bool includePlaylistVideos = false) =>
+        (includePlaylistVideos || !InPlaylist(v)) && v.Present && v.Watch.Status == Watch.New
         && v.Watch.PosMs == 0 && v.Watch.LastWatchedAt == null && v.Watch.FinishedAt == null
         && string.IsNullOrEmpty(v.Watch.Coverage) && !v.Flags.Keep && v.Flags.Rating <= 0 && !v.Flags.Redownload
         && !v.Mount.Others.Any(d => EverWatched(d.Items.GetValueOrDefault(v.Key)?.Watch))
         && !EverWatched(v.Mount.Mine.GetValueOrDefault(v.Key)?.Watch)
         && v.Meta.AddedAt is > 0 && now - v.Meta.AddedAt.Value >= 30L * 86400_000;
 
-    public static List<Video> Stale(Mount m) => Videos().Where(v => v.Mount == m && StaleUnwatched(v, Format.Now()))
+    public static List<Video> Stale(Mount m, bool includePlaylistVideos = false) => Videos().Where(v => v.Mount == m && StaleUnwatched(v, Format.Now(), includePlaylistVideos))
         .OrderBy(v => v.Flags.Rating).ThenBy(v => v.Meta.AddedAt).ToList();
 
-    public static List<Video> Watched(Mount m) => Videos().Where(v => v.Mount == m && v.Present && v.Watch.Status == Watch.Finished && !v.Flags.Keep).ToList();
+    public static List<Video> Watched(Mount m, bool includePlaylistVideos = false) => Videos().Where(v => v.Mount == m &&
+        v.Present && v.Watch.Status == Watch.Finished && !v.Flags.Keep && (includePlaylistVideos || !InPlaylist(v))).ToList();
 
     /// <summary>
     /// Deletes watched videos the user ticked: only a file whose fingerprint still matches its record,
     /// plus its subtitles; the card, history and a cover stay, and it is never downloaded again by itself.
     /// </summary>
-    public static (int Count, long Bytes) DeleteWatched(Mount m, IEnumerable<Video> list, bool replaceStale = false)
+    public static (int Count, long Bytes) DeleteWatched(Mount m, IEnumerable<Video> list, bool replaceStale = false, bool includePlaylistVideos = false)
     {
         int n = 0; long bytes = 0;
         var gone = new HashSet<string>();
@@ -663,7 +712,8 @@ public static class Lib
         {
             if (v.Mount != m || v.Flags.Keep || v.Found is not { } f) continue;
             var latest = new Video(v.Key, m, m.Merged.GetValueOrDefault(v.Key) ?? new Item { Meta = v.Meta, Watch = v.Watch, Flags = v.Flags }, f);
-            if (latest.Flags.Keep || (replaceStale ? !StaleUnwatched(latest, Format.Now()) : latest.Watch.Status != Watch.Finished)) continue;
+            if (latest.Flags.Keep || !includePlaylistVideos && InPlaylist(latest) ||
+                (replaceStale ? !StaleUnwatched(latest, Format.Now(), includePlaylistVideos) : latest.Watch.Status != Watch.Finished)) continue;
             if (m.Phone != null)
             {
                 // over the cable the file is matched by path and size (fingerprinting it would mean reading it all)

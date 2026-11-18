@@ -162,8 +162,8 @@
         <Grid Grid.ColumnSpan="2" Margin="18,10,18,6">
             <Grid.ColumnDefinitions><ColumnDefinition Width="200" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <Border Background="{StaticResource YtRedBrush}" CornerRadius="7" Width="34" Height="24">
-                    <Path Data="M0,0 L10,6 L0,12 Z" Fill="White" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="2,0,0,0" />
+                <Border Background="{StaticResource YtRedBrush}" CornerRadius="7" Width="27" Height="27">
+                    <Path Data="M0,0 H4 V6 L10,0 H14 L7.5,7 L14,14 H9.7 L4,8 V14 H0 Z" Fill="White" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="2,0,0,0" />
                 </Border>
                 <TextBlock Text="KouTube" FontSize="22" FontWeight="Bold" Margin="6,0,0,0" VerticalAlignment="Center" />
             </StackPanel>
@@ -362,6 +362,8 @@
                         <TextBlock Text="(0 — не качать, максимум 1000; весят копейки)" VerticalAlignment="Center" Opacity="0.7" />
                     </StackPanel>
 
+                    <CheckBox x:Name="ShortComments" Content="Скачивать комментарии к Shorts" Margin="0,8,0,0" />
+                    <CheckBox x:Name="CommentReplies" Content="Скачивать ответы на комментарии" Margin="0,6,0,0" />
                     <TextBlock Text="Рекомендации" FontSize="20" FontWeight="SemiBold" Margin="0,24,0,6" />
                     <Button Content="Сбросить рекомендации" HorizontalAlignment="Left" Click="OnResetRecommendations" />
                     <TextBlock Text="Сброс предпочтений KouTube и тем подборки. Видео и история сохранятся. Подключённый YouTube продолжит влиять на подборку." TextWrapping="Wrap" Opacity="0.7" Margin="0,6,0,0" />
@@ -371,6 +373,9 @@
                         <TextBlock Text="Временная папка загрузок:" VerticalAlignment="Center" />
                         <TextBox x:Name="TempDir" Width="420" Margin="8,0" />
                     </StackPanel>
+                    <TextBlock Text="Резервный сервер Cobalt (необязательно)" Margin="0,12,0,4" />
+                    <TextBox x:Name="FallbackApi" MaxWidth="420" HorizontalAlignment="Left" MinWidth="300" />
+                    <TextBlock Text="Адрес разрешённого HTTPS API. Используется после повторных сбоев. Сервер получает ссылку на видео." TextWrapping="Wrap" Opacity="0.7" />
                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                         <Button Content="Обновить yt-dlp" Click="OnUpdateYtDlp" />
                         <TextBlock x:Name="ToolsText" VerticalAlignment="Center" Margin="10,0" Opacity="0.7" />

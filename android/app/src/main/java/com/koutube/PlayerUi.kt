@@ -3,7 +3,6 @@ package com.koutube
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
-import android.view.OrientationEventListener
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -11,12 +10,18 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import kotlinx.coroutines.CoroutineStart
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -117,10 +122,12 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
     val activity = LocalContext.current as Activity
     val view = LocalView.current
     val cfg = LocalConfiguration.current
-    val landscape = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val splitView = cfg.screenWidthDp >= 840 && cfg.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val sideWidth = (cfg.screenWidthDp * 0.36f).coerceIn(280f, 420f).dp
     val tablet = cfg.smallestScreenWidthDp >= 600
     var full by rememberSaveable { mutableStateOf(false) }
-    val fullscreen = full || (landscape && !tablet)        // a phone turned sideways is fullscreen, like YouTube
+    val fullscreen = full
+    var zoom by remember(v?.key) { mutableStateOf(1f) }
     var locked by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf(false) }
     var more by remember { mutableStateOf(false) }
@@ -128,13 +135,15 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
     val portraitVideo = (cur.meta.height ?: 0) > (cur.meta.width ?: 1)
 
     Immersive(fullscreen)
-    OrientationUnlock(activity)
+    LaunchedEffect(fullscreen, tablet, portraitVideo) {
+        if (!tablet) activity.requestedOrientation = if (fullscreen && !portraitVideo)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+    }
     val expand by Playback.expandFull.collectAsState()
     LaunchedEffect(expand) {
         if (!expand) return@LaunchedEffect
         Playback.expandFull.value = false
         full = true
-        if (!tablet && !portraitVideo) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -142,16 +151,7 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
             WindowCompat.getInsetsController(activity.window, view).show(WindowInsetsCompat.Type.systemBars())
         }
     }
-    val toggleFull: () -> Unit = {
-        when {
-            tablet -> full = !full
-            fullscreen -> { full = false; activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT }
-            else -> { full = true; if (!portraitVideo) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE }
-        }
-    }
-    // YouTube's gestures on the picture: down = miniplayer (or out of fullscreen), up = fullscreen (or "Другие видео").
-    // Swiping down shrinks the page into the corner where the small window lives, following the finger; tapping that
-    // window grows it back from there. A fresh video fades in with a short rise.
+    val toggleFull: () -> Unit = { full = !full; zoom = 1f }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val screenH = with(density) { cfg.screenHeightDp.dp.toPx() }
@@ -165,32 +165,28 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
     val statusTop = with(density) { WindowInsets.statusBars.asPaddingValues().calculateTopPadding().toPx() }
     val navBottom = with(density) { WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding().toPx() }
     val miniW = with(density) { (if (tablet) 360.dp else cfg.screenWidthDp.dp * 0.5f).toPx() }
-    val playerH = statusTop + (if (landscape) screenW - with(density) { 400.dp.toPx() } else screenW) * 9f / 16f
+    val playerH = statusTop + (if (splitView) screenW - with(density) { sideWidth.toPx() } else screenW) * 9f / 16f
     val miniBottom = screenH - navBottom - with(density) { (8.dp + 49.dp + 46.dp).toPx() }     // where the small window's picture ends
     val minimize: () -> Unit = {
         scope.launch { shrink.animateTo(1f, tween(240, easing = FastOutSlowInEasing)); Playback.minimized.value = true }
     }
     val toggleFullNow by rememberUpdatedState(toggleFull)
-    val swipe = Modifier.pointerInput(fullscreen, locked) {
-        if (locked) return@pointerInput
+    val swipe = Modifier.pointerInput(fullscreen, locked, sheet) {
+        if (locked || sheet || fullscreen) return@pointerInput
         var total = 0f
-        detectVerticalDragGestures(
-            onDragStart = { total = 0f },
-            onDragEnd = {
-                val far = 64.dp.toPx()
-                when {
-                    total > far && fullscreen -> toggleFullNow()
-                    total > far -> minimize()
-                    total < -far && fullscreen -> more = true
-                    total < -far -> toggleFullNow()
-                }
-                if (!(total > far && !fullscreen)) scope.launch { shrink.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
-            },
-            onDragCancel = { scope.launch { shrink.animateTo(0f) } },
-        ) { ch, dy ->
-            ch.consume(); total += dy
-            // right away, not on the next frame: the page sticks to the finger
-            if (!fullscreen) scope.launch(start = CoroutineStart.UNDISPATCHED) { shrink.snapTo((total / (screenH * 0.55f)).coerceIn(0f, 1f)) }
+        var fromEdge = false
+        detectVerticalDragGestures(onDragStart = { total = 0f; fromEdge = it.y < 32.dp.toPx() }, onDragEnd = {
+            val threshold = 96.dp.toPx()
+            if (!fromEdge && total > threshold) minimize()
+            else {
+                if (!fromEdge && total < -threshold) toggleFullNow()
+                scope.launch { shrink.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+            }
+        }, onDragCancel = { scope.launch { shrink.animateTo(0f) } }) { _, dy ->
+            if (!fromEdge) {
+                total += dy
+                scope.launch(start = CoroutineStart.UNDISPATCHED) { shrink.snapTo((total / (screenH * 0.55f)).coerceIn(0f, 1f)) }
+            }
         }
     }
     BackHandler {
@@ -204,13 +200,26 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
     }
 
     val playerBox: @Composable (Modifier) -> Unit = { m ->
-        Box(m.background(Color.Black).then(swipe)) {
-            VideoSurface(Modifier.fillMaxSize())
+        val pinch = if (!locked && fullscreen) Modifier.pointerInput(cur.key) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                do {
+                    val event = awaitPointerEvent()
+                    if (event.changes.count { it.pressed && it.previousPressed } >= 2) {
+                        zoom = (zoom * event.calculateZoom()).coerceIn(1f, 3f)
+                        event.changes.forEach { it.consume() }
+                    }
+                } while (event.changes.any { it.pressed })
+            }
+        } else Modifier
+        Box(m.background(Color.Black).clipToBounds().then(swipe).then(pinch)) {
+            VideoSurface(Modifier.fillMaxSize().graphicsLayer { scaleX = zoom; scaleY = zoom })
             if (!locked) PlayerChrome(cur, fullscreen, toggleFull, minimize, onSettings = { sheet = true }, onMore = { more = !more })
             else LockOverlay { locked = false }
             if (more && fullscreen) MorePanel(cur, queue, all, play, Modifier.align(Alignment.CenterEnd)) { more = false }
             ResumeChip(Modifier.align(Alignment.BottomStart).padding(bottom = if (fullscreen) 104.dp else 44.dp))      // above the time pill
             ErrorOverlay(onClose)
+            NextCountdown(Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 64.dp))
         }
     }
 
@@ -229,12 +238,12 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
     }.background(MaterialTheme.colorScheme.background)) {
         when {
             fullscreen -> playerBox(Modifier.fillMaxSize())
-            landscape -> Row(Modifier.fillMaxSize().statusBarsPadding()) {      // tablet sideways: video left, "next" right
+            splitView -> Row(Modifier.fillMaxSize().statusBarsPadding()) {
                 LazyColumn(Modifier.weight(1f)) {
                     item { playerBox(Modifier.fillMaxWidth().aspectRatio(16 / 9f)) }
                     item { VideoInfo(cur) }
                 }
-                UpNext(cur, queue, all, play, Modifier.width(400.dp).fillMaxHeight(), compact = false)
+                UpNext(cur, queue, all, play, Modifier.width(sideWidth).fillMaxHeight(), compact = false)
             }
             else -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
                 playerBox(Modifier.fillMaxWidth().aspectRatio(16 / 9f))
@@ -243,7 +252,7 @@ fun PlayerScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onClose: 
         }
         DimOverlay()
     }
-    if (sheet) PlayerSettings(fullscreen, onDismiss = { sheet = false }, onLock = { sheet = false; locked = true })
+    if (sheet) PlayerSettings(onDismiss = { sheet = false }, onLock = { sheet = false; locked = true })
 }
 
 /**
@@ -263,41 +272,6 @@ fun Immersive(on: Boolean) {
         else c.show(WindowInsetsCompat.Type.systemBars())
     }
     DisposableEffect(Unit) { onDispose { WindowCompat.getInsetsController(activity.window, view).show(WindowInsetsCompat.Type.systemBars()) } }
-}
-
-/** The same inside a sheet: it is a window of its own, which brings the bars back while it is open. */
-@Composable
-private fun DialogBars(hide: Boolean) {
-    val view = LocalView.current
-    LaunchedEffect(hide) {
-        if (!hide) return@LaunchedEffect
-        (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window?.let { w ->
-            WindowCompat.getInsetsController(w, w.decorView).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.systemBars())
-            }
-        }
-    }
-}
-
-/** After a forced rotation, give the sensor back once the phone is physically held that way. */
-@Composable
-private fun OrientationUnlock(activity: Activity) {
-    DisposableEffect(Unit) {
-        val l = object : OrientationEventListener(activity) {
-            override fun onOrientationChanged(deg: Int) {
-                if (deg == ORIENTATION_UNKNOWN) return
-                val portrait = deg < 20 || deg > 340
-                val side = deg in 70..110 || deg in 250..290
-                when (activity.requestedOrientation) {
-                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT -> if (portrait) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE -> if (side) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                }
-            }
-        }
-        l.enable()
-        onDispose { l.disable() }
-    }
 }
 
 // ---------- YouTube's controls ----------
@@ -461,7 +435,7 @@ private fun SeekBar(p: Pos, thumb: Boolean, modifier: Modifier, onScrub: (Long?)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerSettings(fullscreen: Boolean, onDismiss: () -> Unit, onLock: () -> Unit) {
+private fun PlayerSettings(onDismiss: () -> Unit, onLock: () -> Unit) {
     var page by remember { mutableStateOf("main") }
     val player = Playback.player
     val p by rememberPos()
@@ -473,9 +447,15 @@ private fun PlayerSettings(fullscreen: Boolean, onDismiss: () -> Unit, onLock: (
     val subsOff = player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
     var repeat by remember { mutableStateOf(player.repeatMode == Player.REPEAT_MODE_ONE) }
     // YouTube's sheet: dark, rounded, centred when the phone is sideways
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Color(0xFF212121), contentColor = Color.White, sheetMaxWidth = 600.dp) {
-        DialogBars(hide = fullscreen)
-        Column(Modifier.padding(bottom = 16.dp)) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+        Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f))
+            .pointerInput(onDismiss) { detectTapGestures { onDismiss() } })
+        val enter = remember { Animatable(1f) }
+        LaunchedEffect(Unit) { enter.animateTo(0f, tween(200, easing = FastOutSlowInEasing)) }
+        Surface(Modifier.widthIn(max = 600.dp).fillMaxWidth().fillMaxHeight(0.88f).wrapContentHeight(Alignment.Bottom)
+            .graphicsLayer { translationY = size.height * enter.value },
+            shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp), color = Color(0xFF212121), contentColor = Color.White) {
+        Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding().padding(top = 10.dp, bottom = 12.dp)) {
             when (page) {
                 "main" -> {
                     val m = cur?.meta
@@ -487,7 +467,7 @@ private fun PlayerSettings(fullscreen: Boolean, onDismiss: () -> Unit, onLock: (
                     if (audios.isNotEmpty()) SheetRow(Icons.Outlined.RecordVoiceOver, "Звуковая дорожка",
                         audios.firstOrNull { it.isSelected }?.mediaTrackGroup?.getFormat(0)?.let { it.label ?: it.language?.let(::langName) } ?: "Оригинальная",
                         arrow = audios.size > 1) { if (audios.size > 1) page = "audio" }
-                    SheetRow(Icons.Rounded.Refresh, "Восстановить синхронизацию", "Без перезапуска приложения", arrow = false) { Playback.repairSync(); onDismiss() }
+                    SheetRow(Icons.Rounded.Refresh, "Восстановить синхронизацию", "", arrow = false) { Playback.repairSync(); onDismiss() }
                     SheetRow(Icons.Outlined.Settings, "Ещё", "") { page = "more" }
                     SheetRow(Icons.Outlined.Lock, "Блокировка экрана", "", arrow = false) { onLock() }
                 }
@@ -541,6 +521,7 @@ private fun PlayerSettings(fullscreen: Boolean, onDismiss: () -> Unit, onLock: (
         }
     }
 }
+}
 
 private fun langName(code: String) = when (code.take(2)) { "ru" -> "Русский"; "en" -> "Английский"; "uk" -> "Украинский"; "de" -> "Немецкий"; else -> code }
 
@@ -577,7 +558,7 @@ private fun VideoInfo(v: Video) {
         Text(fresh.title, fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis)
         // YouTube's line under the title: when it came out, in words ("9 месяцев назад")
         val published = fresh.meta.published?.let { runCatching { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).parse(it)?.time }.getOrNull() }
-        Text(listOfNotNull(ago(published).takeIf { it.isNotEmpty() }, ago(fresh.meta.addedAt).takeIf { it.isNotEmpty() }?.let { "добавлено $it" })
+        Text(listOfNotNull(fresh.meta.viewCount?.let { count(it) + " просмотров" }, ago(published).takeIf { it.isNotEmpty() }, ago(fresh.meta.addedAt).takeIf { it.isNotEmpty() }?.let { "добавлено $it" })
             .joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
         val ofChannel = Lib.videos.collectAsState().value.count { it.present && it.meta.channel != null && it.meta.channel == fresh.meta.channel }
         Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -594,7 +575,10 @@ private fun VideoInfo(v: Video) {
             Row(Modifier.clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.surfaceVariant).height(36.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.fillMaxHeight().clickable { Lib.rate(fresh, if (fresh.flags.rating > 0) 0 else 1) }.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                    Icon(if (fresh.flags.rating > 0) Icons.Rounded.ThumbUp else Icons.Outlined.ThumbUp, "Нравится", Modifier.size(20.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (fresh.flags.rating > 0) Icons.Rounded.ThumbUp else Icons.Outlined.ThumbUp, "Нравится", Modifier.size(20.dp))
+                        fresh.meta.likeCount?.let { Text(count(it), Modifier.padding(start = 6.dp), fontSize = 13.sp) }
+                    }
                 }
                 Box(Modifier.width(1.dp).height(20.dp).background(MaterialTheme.colorScheme.outline))
                 Box(Modifier.fillMaxHeight().clickable { Lib.rate(fresh, if (fresh.flags.rating < 0) 0 else -1) }.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
@@ -650,28 +634,48 @@ private fun CommentsCard(v: Video) {
 @Composable
 private fun CommentsSheet(list: List<Comment>, total: Long?, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surface, sheetMaxWidth = 720.dp) {
-        DialogBars(hide = Playback.current.collectAsState().value?.isShort == true)
-        Text("Комментарии  " + count(total ?: list.size.toLong()), Modifier.padding(start = 16.dp, bottom = 8.dp), fontWeight = FontWeight.Bold, fontSize = 18.sp)
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 640.dp), contentPadding = WindowInsets.navigationBars.asPaddingValues()) {
-            items(list) { c ->
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-                    Avatar(c.a.removePrefix("@"), 32)
-                    Column(Modifier.padding(start = 12.dp)) {
-                        if (c.p) Text("📌 Закреплено", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(c.a, fontSize = 12.sp, fontWeight = if (c.u) FontWeight.Bold else FontWeight.Normal,
-                                color = if (c.u) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = if (c.u) Modifier.background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)).padding(horizontal = 6.dp) else Modifier)
-                            c.ts?.let { Text("  ·  " + ago(it * 1000), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        }
-                        Text(c.t, fontSize = 14.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 2.dp))
-                        if (c.l > 0) Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.ThumbUp, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("  " + count(c.l), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+        CommentsContent(list, total)
+    }
+}
+
+@Composable
+private fun CommentsContent(list: List<Comment>?, total: Long?) {
+    val threads = remember(list) { list.orEmpty().filter { it.parent != null && it.parent != "root" }.groupBy { it.parent } }
+    val roots = remember(list) { list.orEmpty().filter { it.parent == null || it.parent == "root" } }
+    Text("Комментарии" + (total ?: list?.size?.toLong())?.let { " · " + count(it) }.orEmpty(),
+        Modifier.padding(16.dp), fontWeight = FontWeight.Bold, fontSize = 18.sp)
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+    if (list.isNullOrEmpty()) {
+        Text(if (list == null) "Загрузка…" else "Для этого видео комментарии не сохранены.",
+            Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 640.dp), contentPadding = WindowInsets.navigationBars.asPaddingValues()) {
+        items(roots) { c ->
+            var open by remember(c.id) { mutableStateOf(false) }
+            val replies = c.id?.let(threads::get).orEmpty()
+            CommentRow(c)
+            if (replies.isNotEmpty()) TextButton({ open = !open }, Modifier.padding(start = 52.dp)) {
+                Text(if (open) "Скрыть ответы" else "Ответы (" + replies.size + ")")
+            }
+            if (open) replies.forEach { CommentRow(it, inset = 36) }
+        }
+    }
+}
+
+@Composable
+private fun CommentRow(c: Comment, inset: Int = 0) {
+    Row(Modifier.fillMaxWidth().padding(start = (16 + inset).dp, end = 16.dp, top = 10.dp, bottom = 10.dp)) {
+        Avatar(c.a.removePrefix("@"), 32)
+        Column(Modifier.padding(start = 12.dp)) {
+            if (c.p) Text("Закреплено", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(c.a, fontSize = 12.sp, fontWeight = if (c.u) FontWeight.Bold else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                c.ts?.let { Text("  ·  " + ago(it * 1000), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            Text(c.t, fontSize = 14.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 2.dp))
+            if (c.l > 0) Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.ThumbUp, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("  " + count(c.l), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -685,27 +689,22 @@ private fun Pill(icon: ImageVector, text: String, onClick: () -> Unit) = Row(
     Text(text, Modifier.padding(start = 6.dp), fontSize = 14.sp, fontWeight = FontWeight.Medium)
 }
 
-/**
- * What to watch next, YouTube-style: the rest of the list the video was opened from, then the closest from the
- * collection, then everything else — watched ones last. The first card is what autoplay picks.
- */
-fun recommended(cur: Video, queue: List<Video>, all: List<Video>): List<Video> {
-    val i = queue.indexOfFirst { it.key == cur.key }
-    val next = if (i >= 0) queue.drop(i + 1).filter { !it.finished } else emptyList()
-    val pool = all.filter { it.present && !it.isShort && it.key != cur.key }
-    return (next + similar(cur, all, 30) + pool.filter { !it.finished }.sortedByDescending { it.meta.addedAt ?: 0 } + pool.filter { it.finished })
-        .distinctBy { it.storageId + it.key }.filter { it.key != cur.key }
-}
-
 /** [compact] = small rows (tablet side column, fullscreen panel); otherwise full-width cards like the home feed. */
 @Composable
 private fun UpNext(cur: Video, queue: List<Video>, all: List<Video>, play: (List<Video>, Video) -> Unit, modifier: Modifier,
                    compact: Boolean = true, header: (@Composable () -> Unit)? = null) {
-    val recs = recommended(cur, queue, all)
+    val playlist by Playback.playlistMode.collectAsState()
+    val recs by produceState(emptyList<Video>(), cur.key, all, playlist, queue) {
+        value = if (playlist) queue.dropWhile { it.key != cur.key }.drop(1)
+            else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { recommended(cur, all) }
+    }
+    val open: (Video) -> Unit = { video ->
+        if (playlist) Playback.play(queue, video, fromPlaylist = true) else play(recs, video)
+    }
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     if (compact) LazyColumn(modifier.background(MaterialTheme.colorScheme.background), contentPadding = PaddingValues(top = 8.dp, bottom = bottom)) {
         header?.let { h -> item { h() } }
-        items(recs, key = { "r" + it.storageId + it.key }) { r -> NextRow(r) { play(recs, r) } }
+        items(recs, key = { "r" + it.storageId + it.key }) { r -> NextRow(r) { open(r) } }
     }
     // cards like the home feed: one column on a phone, two under the video on a tablet, one in the tablet's side column
     else {
@@ -714,7 +713,19 @@ private fun UpNext(cur: Video, queue: List<Video>, all: List<Video>, play: (List
             contentPadding = PaddingValues(start = if (wide) 16.dp else 0.dp, end = if (wide) 16.dp else 0.dp, top = if (header == null) 12.dp else 0.dp, bottom = bottom),
             horizontalArrangement = Arrangement.spacedBy(if (wide) 16.dp else 0.dp)) {
             header?.let { h -> item(span = { GridItemSpan(maxLineSpan) }) { h() } }
-            gridItems(recs, key = { "r" + it.storageId + it.key }) { r -> VideoCard(r, { play(recs, r) }) }
+            gridItems(recs, key = { "r" + it.storageId + it.key }) { r -> VideoCard(r, { open(r) }) }
+        }
+    }
+}
+
+@Composable
+private fun NextCountdown(modifier: Modifier) {
+    val remaining by Playback.nextIn.collectAsState()
+    if (remaining <= 0) return
+    Surface(modifier, shape = RoundedCornerShape(16.dp), color = Color(0xF52A2434), contentColor = Color.White) {
+        Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Следующее через $remaining с")
+            TextButton(Playback::cancelNext) { Text("Отмена", color = Color.White) }
         }
     }
 }
@@ -884,29 +895,36 @@ fun ShortsPlayer(onClose: () -> Unit) {
     val idx = queue.indexOfFirst { it.key == cur?.key }.coerceAtLeast(0)
     val pager = rememberPagerState(idx) { queue.size }
     val p by rememberPos()
+    val firstFrame by Playback.rendered.collectAsState()
     val scope = rememberCoroutineScope()
     var holding by remember { mutableStateOf(false) }
     var skipTap by remember { mutableStateOf(false) }
     var talk by remember { mutableStateOf<Video?>(null) }                                         // whose comments are open
-    talk?.let { t ->
-        val list by produceState<List<Comment>?>(null, t.key) { value = Lib.comments(t) }
-        list?.let { CommentsSheet(it, t.meta.commentCount) { talk = null } }
-    }
-    LaunchedEffect(idx) { if (pager.currentPage != idx) pager.animateScrollToPage(idx) }          // player → pager
+    LaunchedEffect(idx) { if (pager.settledPage != idx) pager.scrollToPage(idx) }          // player → pager
     LaunchedEffect(pager.settledPage) {                                                           // pager → player
         val pg = pager.settledPage
         if (Playback.player.currentMediaItemIndex != pg) { Playback.player.seekToDefaultPosition(pg); Playback.player.play() }
     }
-    BackHandler(onBack = onClose)
+    BackHandler { if (talk != null) talk = null else onClose() }
     Immersive(true)
     // a Short repeats until you swipe, like YouTube
-    DisposableEffect(Unit) { Playback.player.repeatMode = Player.REPEAT_MODE_ONE; onDispose { Playback.player.repeatMode = Player.REPEAT_MODE_OFF } }
+    DisposableEffect(Unit) {
+        Playback.player.repeatMode = Player.REPEAT_MODE_ONE
+        Playback.player.pauseAtEndOfMediaItems = false
+        onDispose {
+            Playback.player.repeatMode = Player.REPEAT_MODE_OFF
+            Playback.player.pauseAtEndOfMediaItems = true
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        VerticalPager(pager, Modifier.fillMaxSize()) { page ->
+        VerticalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = talk == null) { page ->
             val s = all.firstOrNull { it.key == queue[page].key && it.storageId == queue[page].storageId } ?: queue[page]
             Box(Modifier.fillMaxSize()) {
-                if (page == pager.settledPage) Box(Modifier.fillMaxSize().pointerInput(Unit) {
+                val active = page == pager.settledPage && cur?.key == s.key
+                val ready = active && firstFrame == s.key
+                if (!ready) Thumb(s, Modifier.fillMaxSize())
+                if (active) Box(Modifier.fillMaxSize().pointerInput(Unit) {
                     detectTapGestures(
                         onPress = {
                             val job = scope.launch { delay(450); holding = true; Playback.hold2x(true) }
@@ -915,7 +933,7 @@ fun ShortsPlayer(onClose: () -> Unit) {
                         },
                         onTap = { if (skipTap) skipTap = false else if (Playback.player.isPlaying) Playback.player.pause() else Playback.player.play() },
                     )
-                }) { VideoSurface(Modifier.fillMaxSize()) } else Thumb(s, Modifier.fillMaxSize())
+                }) { VideoSurface(Modifier.fillMaxSize().graphicsLayer { alpha = if (ready) 1f else 0f }) }
                 if (page == pager.settledPage && !p.playing && !p.buffering && !holding)
                     Icon(Icons.Rounded.PlayArrow, null, Modifier.align(Alignment.Center).size(72.dp), tint = Color.White.copy(alpha = 0.8f))
                 if (page == pager.settledPage && holding) Row(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 16.dp)
@@ -935,9 +953,9 @@ fun ShortsPlayer(onClose: () -> Unit) {
                 // YouTube's column on the right
                 Column(Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    ShortAction(if (s.flags.rating > 0) Icons.Rounded.ThumbUp else Icons.Outlined.ThumbUp, "Нравится") { Lib.rate(s, if (s.flags.rating > 0) 0 else 1) }
+                    ShortAction(if (s.flags.rating > 0) Icons.Rounded.ThumbUp else Icons.Outlined.ThumbUp, s.meta.likeCount?.let(::count) ?: "Нравится") { Lib.rate(s, if (s.flags.rating > 0) 0 else 1) }
                     ShortAction(if (s.flags.rating < 0) Icons.Rounded.ThumbDown else Icons.Outlined.ThumbDown, "Не нравится") { Lib.rate(s, if (s.flags.rating < 0) 0 else -1) }
-                    if (s.meta.comments != null) ShortAction(Icons.Outlined.ChatBubbleOutline, count(s.meta.commentCount ?: 0)) { talk = s }
+                    ShortAction(Icons.Outlined.ChatBubbleOutline, s.meta.commentCount?.let(::count) ?: "Комментарии") { talk = s }
                     SleepButton()
                     VideoMenu(s, tint = Color.White)
                 }
@@ -946,6 +964,15 @@ fun ShortsPlayer(onClose: () -> Unit) {
         }
         ErrorOverlay(onClose)
         DimOverlay()
+        talk?.let { video ->
+            val list by produceState<List<Comment>?>(null, video.key) { value = Lib.comments(video) }
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.48f))
+                .pointerInput(Unit) { detectTapGestures { talk = null } })
+            Surface(Modifier.align(Alignment.BottomCenter).widthIn(max = 720.dp).fillMaxWidth().fillMaxHeight(0.7f),
+                shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)) {
+                Column { CommentsContent(list, video.meta.commentCount) }
+            }
+        }
     }
 }
 

@@ -135,7 +135,7 @@ public static class Recommend
         var counts = new Dictionary<string, (int, int, int)>();
         var words = new Dictionary<string, double>();
         var inVideos = new Dictionary<string, int>();
-        foreach (var v in all)
+        foreach (var v in all.Where(v => !Lib.InPlaylist(v) || !IsMusic(v.Title, v.Meta.Channel)))
         {
             var sig = Signal(v) + 0.2;      // being in the library at all is a small "yes"
             if (v.Meta.Channel is { } c)
@@ -367,6 +367,8 @@ public static class Recommend
     public static List<Pick> Rank(List<Pick> cands, Interests it, HashSet<string> skip)
     {
         var exclude = Lib.Config.Exclude.Select(Plain).Where(w => w.Length > 0).ToList();
+        var requested = Lib.Config.Keywords.Select(k => (Text: Plain(k), Words: Words(k).Distinct().ToArray()))
+            .Where(k => k.Text.Length > 0).ToArray();
         return cands.Where(p => !skip.Contains(p.Id) && !IsMusic(p.Title, p.Channel) && (exclude.Count == 0 || !exclude.Any(Plain(p.Title + " " + p.Channel).Contains)) && (p.Channel == null || !it.Blocked.Contains(p.Channel)) && (it.Scripts.Count == 0 || Script(p.Title) is var s && (s == ' ' || it.Scripts.Contains(s)))).Select(p =>
         {
             var why = new List<string>();
@@ -385,6 +387,15 @@ public static class Recommend
             var shared = Words(p.Title).Distinct().Where(it.Words.ContainsKey).ToList();
             var topical = shared.Sum(w => Math.Clamp(it.Words[w], -2, 2));
             score += Math.Clamp(topical, -1.5, 1.5);
+            if (requested.Length > 0)
+            {
+                var title = Plain(p.Title);
+                var words = Words(p.Title).ToHashSet();
+                var relevance = requested.Max(k => (" " + title + " ").Contains(" " + k.Text + " ") ? 2.5 :
+                    k.Words.Length > 0 ? 1.5 * k.Words.Count(words.Contains) / k.Words.Length : 0);
+                score += relevance;
+                if (relevance >= 1.5) why.Add("совпадает с запросом");
+            }
             var good = shared.Where(w => it.Words[w] > 0).OrderByDescending(w => it.Words[w]).Take(3).ToList();
             if (good.Count > 0) why.Add("темы: " + string.Join(", ", good));
             if (p.DurationSec is { } d && p.Kind == "video")
@@ -507,9 +518,23 @@ public static class Recommend
     /// The wizard's third step: the best picks that fit each budget (videos / Shorts). Removing one
     /// pulls in the next best that still fits — the list always fills the space you gave it.
     /// </summary>
-    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null, bool fillAll = false, List<PickIntent.Episode>? available = null)
+    public static int DurationTier(Pick p, string preference)
     {
-        readonly List<Pick> _pool = [.. ranked];
+        if (p.Kind == "short" || preference == "auto") return 0;
+        if (p.DurationSec is not > 0) return 2;
+        var minutes = p.DurationSec.Value / 60;
+        return preference switch
+        {
+            "short" when minutes > 12 => 1,
+            "medium" when minutes < 12 || minutes > 35 => 1,
+            "long" when minutes < 35 => 1,
+            _ => 0
+        };
+    }
+
+    public sealed class Selection(List<Pick> ranked, long videoBytes, long shortBytes, List<Pick>? pinned = null, bool fillAll = false, List<PickIntent.Episode>? available = null, string duration = "auto")
+    {
+        readonly List<Pick> _pool = ranked.OrderBy(p => DurationTier(p, duration)).ToList();
         readonly Dictionary<string, PickIntent.Episode?> _series = ranked.ToDictionary(p => p.Id, p => p.Kind == "short" ? null : PickIntent.Series(p.Title, p.Channel));
         public int SeriesSkipped => _pool.Count(p => _series.GetValueOrDefault(p.Id) != null);
         bool Ready(Pick p)

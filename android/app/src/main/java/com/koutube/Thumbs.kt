@@ -54,16 +54,15 @@ object Thumbs {
         val rel = v.meta.avatar ?: return null
         val key = "a:" + v.storageId + rel
         mem.get(key)?.let { return it }
-        if (key in failed) return null
         return withContext(gen) {
-            val f = File(dir, "av-" + rel.substringAfterLast('/'))
+            val f = File(dir, "av-" + v.storageId.hashCode() + "-" + rel.substringAfterLast('/'))
             val bmp = if (f.exists()) BitmapFactory.decodeFile(f.path) else (
                 if (Lib.isClient) runCatching {
                     val (st, b) = Remote.get(Remote.avatarUrl(v)); if (st == 200) BitmapFactory.decodeByteArray(b, 0, b.size) else null
                 }.getOrNull()
                 else Lib.storageFile(v.storageId, rel)?.let(::decode)
             )?.also { b -> f.outputStream().use { b.compress(Bitmap.CompressFormat.JPEG, 85, it) } }
-            if (bmp == null) { failed += key; null } else bmp.asImageBitmap().also { mem.put(key, it) }
+            bmp?.asImageBitmap()?.also { mem.put(key, it) }
         }
     }
 
@@ -85,7 +84,7 @@ object Thumbs {
                     make(v)?.also { save(it, f) }
                 }
             }
-            if (bmp == null) { if (v.present) failed += v.key; null }
+            if (bmp == null) { if (v.present && !Lib.isClient) failed += v.key; null }
             else bmp.asImageBitmap().also { mem.put(v.key, it) }
         }
     }

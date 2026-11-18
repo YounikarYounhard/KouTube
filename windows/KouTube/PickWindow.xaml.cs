@@ -349,7 +349,7 @@ public partial class PickWindow : Window
             var ranked = Recommend.Diversify(Recommend.Rank(cands, it, skip).Where(p => wanted.All(w => w.Id != p.Id)).ToList(),
                 Lib.Videos().Select(v => v.Title).Concat(hist?.Select(h => h.Title) ?? []));
             Lib.Update(x => x with { LastPickGb = Total.Value });
-            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true, Lib.Videos().Where(v => v.Present || v.Watch.Status == Watch.Finished).Select(v => PickIntent.Series(v.Title, v.Meta.Channel)).OfType<PickIntent.Episode>().ToList()).Fill();
+            _sel = new Recommend.Selection(ranked, total - shorts, shorts, wanted.Select(Recommend.ToPick).ToList(), FillAll.IsChecked == true, Lib.Videos().Where(v => v.Present || v.Watch.Status == Watch.Finished).Select(v => PickIntent.Series(v.Title, v.Meta.Channel)).OfType<PickIntent.Episode>().ToList(), c.PickDuration).Fill();
             // the list appears whole: every cover is here before it shows, so it scrolls without holes
             await Recommend.Covers([.. _sel.Videos.Take(60), .. _sel.Shorts.Take(60), .. _sel.Spare.Take(20)], f => St("Загружаю обложки…", 0.9 + 0.1 * f));
             VideoPicks.ItemsSource = _sel.Videos;

@@ -42,6 +42,7 @@ object Playback {
     }
 
     val queue = MutableStateFlow<List<Video>>(emptyList())
+    val playlistMode = MutableStateFlow(false)
     val current = MutableStateFlow<Video?>(null)
     val error = MutableStateFlow<String?>(null)
     val resumedAt = MutableStateFlow<Long?>(null)
@@ -67,6 +68,15 @@ object Playback {
     private var lastFlush = 0L
     private val finished = HashSet<String>()
     private var retries = 0
+    val rendered = MutableStateFlow<String?>(null)
+    val nextIn = MutableStateFlow(0)
+    private var nextJob: Job? = null
+    private var retryJob: Job? = null
+
+    fun cancelNext() {
+        nextJob?.cancel()
+        nextIn.value = 0
+    }
     /** True while something plays — heavy background work (cutting cover frames) waits for it. */
     val busy get() = current.value != null
     private val seen = HashMap<String, Long>()        // last position seen per video, for when the player already moved on
@@ -82,18 +92,22 @@ object Playback {
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !on).build()
     }
 
-    fun play(list: List<Video>, start: Video) {
+    fun play(list: List<Video>, start: Video, fromPlaylist: Boolean = false) {
         current.value?.let { save(it, player.currentPosition) }
+        cancelNext()
+        retryJob?.cancel()
+        rendered.value = null
         hold2x(false)
-        val q = list.filter { it.present }.ifEmpty { listOf(start) }
+        val q = list.filter { it.present }.distinctBy { it.key }.ifEmpty { listOf(start) }
+        playlistMode.value = fromPlaylist
         val i = q.indexOfFirst { it.key == start.key }.coerceAtLeast(0)
         error.value = null
         minimized.value = false
         queue.value = q
         current.value = null
-        player.setMediaItems(q.map(::item), i, resumePos(q[i]))
+        player.setMediaItems(q.map(::item), i, if (fromPlaylist) 0 else resumePos(q[i]))
         if (current.value == null) becomeCurrent(q[i])
-        player.pauseAtEndOfMediaItems = !Lib.settings.value.autoplay
+        player.pauseAtEndOfMediaItems = true
         setSubtitles(Lib.settings.value.defaultSubtitles)
         player.prepare()
         player.play()
@@ -104,12 +118,16 @@ object Playback {
 
     fun close() {
         current.value?.let { save(it, player.currentPosition) }
+        cancelNext()
+        retryJob?.cancel()
+        rendered.value = null
         current.value = null                 // first, so the playlist-cleared event below saves nothing
         ticker?.cancel()
         stopSleep()
         player.stop()
         player.clearMediaItems()
         queue.value = emptyList()
+        playlistMode.value = false
         App.instance.stopService(Intent(App.instance, PlaybackService::class.java))
         Lib.flushAll()
     }
@@ -203,7 +221,12 @@ object Playback {
     }
 
     private val listener = object : Player.Listener {
+        override fun onRenderedFirstFrame() { rendered.value = player.currentMediaItem?.mediaId }
+
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (mediaItem?.mediaId != rendered.value) rendered.value = null
+            retryJob?.cancel()
+            cancelNext()
             val prev = current.value
             if (prev != null && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                 // the previous video played to its end: count the last few seconds the ticker missed
@@ -216,13 +239,35 @@ object Playback {
             becomeCurrent(latest(next))
             error.value = null
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
-                val p = resumePos(current.value!!)
+                val p = if (playlistMode.value) 0 else resumePos(current.value!!)
                 if (p > 0) player.seekTo(p)
             }
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM && sleepEndsAt.value == Long.MAX_VALUE) stopSleep()
+            if (playWhenReady) { cancelNext(); return }
+            if (reason != Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) return
+            val v = current.value ?: return
+            val dur = duration(v)
+            if (!sleeping && lastPos >= 0 && dur - lastPos < 4000)
+                for (segment in lastPos / SEGMENT_MS..(dur - 1) / SEGMENT_MS) cov?.mark(segment.toInt())
+            checkFinish(v, dur, ended = true)
+            save(v, if (v.key in finished) 0 else dur)
+            if (sleepEndsAt.value == Long.MAX_VALUE) { stopSleep(); return }
+            if (player.repeatMode == Player.REPEAT_MODE_ONE) {
+                player.seekTo(0)
+                player.play()
+                return
+            }
+            if (!playlistMode.value && (!Lib.settings.value.autoplay || v.isShort) || !player.hasNextMediaItem()) return
+            nextJob = main.launch {
+                for (second in 3 downTo 1) { nextIn.value = second; delay(1_000) }
+                nextIn.value = 0
+                if (current.value?.key == v.key && (playlistMode.value || Lib.settings.value.autoplay)) {
+                    player.seekToNextMediaItem()
+                    player.play()
+                }
+            }
         }
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
@@ -252,7 +297,11 @@ object Playback {
             val transient = e.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED || e.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
             if (transient && retries < 2) {
                 retries++
-                main.launch { delay(800L * retries); player.prepare(); player.play() }
+                val resume = player.playWhenReady
+                retryJob = main.launch {
+                    delay(800L * retries)
+                    if (current.value?.key == v?.key && player.playerError != null) { player.prepare(); player.playWhenReady = resume }
+                }
                 return
             }
             error.value = when (e.errorCode) {
@@ -271,6 +320,25 @@ object Playback {
                 else -> "Не удалось воспроизвести: ${e.errorCodeName}"
             }
             if (e.errorCode in PlaybackException.ERROR_CODE_IO_UNSPECIFIED..PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE) Lib.refresh(force = true)
+            val networkError = e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+            if (networkError && Lib.isClient && v != null) {
+                val resume = player.playWhenReady
+                retryJob = main.launch {
+                    var delayMs = 3_000L
+                    while (current.value?.key == v.key && player.playerError === e && Remote.conn.value != null) {
+                        delay(delayMs)
+                        Remote.useHomeNetwork()
+                        if (Remote.library().isSuccess && player.playerError === e && current.value?.key == v.key) {
+                            error.value = null
+                            player.prepare()
+                            player.playWhenReady = resume
+                            break
+                        }
+                        delayMs = (delayMs * 2).coerceAtMost(30_000)
+                    }
+                }
+            }
         }
     }
 
@@ -301,7 +369,7 @@ object Playback {
         sleepJob?.cancel()
         sleepJob = null
         player.volume = 1f
-        player.pauseAtEndOfMediaItems = !Lib.settings.value.autoplay
+        player.pauseAtEndOfMediaItems = playlistMode.value || current.value?.isShort != true
         sleepEndsAt.value = null
         dimmed.value = false
     }

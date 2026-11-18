@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive-icon foreground (108dp canvas, safe zone 66dp): a white play triangle. -->
+<!-- Adaptive-icon foreground (108dp canvas, safe zone 66dp): a white K. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:pathData="M45,38 L71,54 L45,70 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M34,33 L45,33 L45,51 L64,33 L76,33 L55,54 L76,75 L63,75 L45,57 L45,75 L34,75 Z" />
 </vector>

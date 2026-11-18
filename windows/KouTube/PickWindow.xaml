@@ -178,7 +178,7 @@
                     <TextBlock Text="Длительность обычных видео" FontSize="22" Margin="0,20,0,8" />
                     <ComboBox x:Name="DurationMode" SelectedValuePath="Tag" SelectionChanged="OnDuration" Width="320" HorizontalAlignment="Left">
                         <ComboBoxItem Tag="long">Больше длинных — около часа</ComboBoxItem>
-                        <ComboBoxItem Tag="medium">Средние — около 20 минут</ComboBoxItem>
+                        <ComboBoxItem Tag="medium">Средние (12–35 мин) — около 20 минут</ComboBoxItem>
                         <ComboBoxItem Tag="short">Больше коротких — около 6 минут</ComboBoxItem>
                         <ComboBoxItem Tag="auto">Автоматически — по просмотрам</ComboBoxItem>
                     </ComboBox>

@@ -30,6 +30,7 @@ import java.util.UUID
     val autoplay: Boolean = true,
     val defaultSubtitles: Boolean = true,
     val showShorts: Boolean = true,
+    val stopIdleSharing: Boolean = true,
     val shareWifi: Boolean = false,        // server: give the library to tablets over Wi-Fi
 )
 
@@ -43,6 +44,7 @@ data class Video(val key: String, val storageId: String, val item: Item, val fou
     val watch get() = item.watch ?: Watch()
     val fileState get() = item.file ?: FileState()
     val flags get() = item.flags ?: Flags()
+    val inPlaylist get() = item.playlists.orEmpty().values.any { it.name != null }
     val present get() = found != null || remotePresent
     val title get() = meta.title ?: found?.doc?.name ?: key
     val isShort get() = meta.kind == "short"
@@ -89,6 +91,7 @@ object Lib {
 
     val settings = MutableStateFlow(runCatching { json.decodeFromString<Settings>(prefs.getString("settings", "")!!) }.getOrDefault(Settings()))
     val videos = MutableStateFlow<List<Video>>(emptyList())
+    val removableVolumes = MutableStateFlow(0)
     val storages = MutableStateFlow<List<StorageView>>(emptyList())
     val busy = MutableStateFlow(false)
     val notice = MutableStateFlow<String?>(null)
@@ -144,6 +147,9 @@ object Lib {
 
     private suspend fun refreshNow() {
         if (isClient) { Remote.useHomeNetwork(); return refreshRemote() }
+        val manager = ctx.getSystemService(android.os.storage.StorageManager::class.java)
+        removableVolumes.value = manager?.storageVolumes.orEmpty().count { it.isRemovable &&
+            it.state in setOf(android.os.Environment.MEDIA_MOUNTED, android.os.Environment.MEDIA_MOUNTED_READ_ONLY) }
         busy.value = true
         lastRefresh = System.currentTimeMillis()
         for (m in mounts.values.toList()) { loadDrive(m); publish() }
@@ -175,7 +181,10 @@ object Lib {
             ctx.contentResolver.takePersistableUriPermission(tree,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             val saf = Saf(tree)
-            if (isPlayer) {
+            val existing = runCatching {
+                saf.child(saf.rootId, ".koutube")?.let { ml -> newestStorage(saf.readCandidates(ml.id, "storage.json")) }
+            }.getOrNull()
+            if (isPlayer && existing == null) {
                 // player mode: the folder stays untouched — no .koutube, the description is kept in the app
                 val m = mounts.values.firstOrNull { it.ref.tree == tree.toString() } ?: run {
                     val name = displayName(saf)
@@ -188,7 +197,7 @@ object Lib {
                 return@runCatching
             }
             val ml = saf.dir(saf.rootId, ".koutube")
-            val sf = newestStorage(saf.readCandidates(ml, "storage.json")) ?: StorageFile(
+            val sf = existing ?: StorageFile(
                 storageId = UUID.randomUUID().toString(), name = displayName(saf), updatedAt = System.currentTimeMillis(),
                 folders = folders,
                 downloadTo = mapOf("video" to (folders.firstOrNull { it.role != "short" }?.path ?: "."),
@@ -196,8 +205,17 @@ object Lib {
             ).also { saf.writeAtomic(ml, "storage.json", seal(json.encodeToString(it)).toByteArray()) }
             val ref = StorageRef(tree.toString(), sf.storageId, sf.name ?: "Хранилище")
             val m = mounts[sf.storageId]?.takeIf { it.ref.tree == ref.tree } ?: Mount(ref).also { mounts[sf.storageId] = it; loadLocal(it) }
+            val old = mounts.values.firstOrNull { it.ref.plain && it.ref.tree == ref.tree }
+            if (old != null) {
+                val joined = merge(listOf(mineFile(old), mineFile(m)))
+                m.mine.clear(); m.mine.putAll(joined)
+                m.dirty = true
+                mounts.remove(old.ref.storageId)
+            }
             saveRefs()
-            loadDrive(m); publish(); probe()
+            loadDrive(m); publish()
+            if (old != null) flush(m)
+            probe()
         }.onFailure { notice.value = "Не удалось подключить папку: ${it.message}" }
     }
 
@@ -396,6 +414,48 @@ object Lib {
 
     fun rate(v: Video, r: Int) = setFlags(v) { it.copy(rating = r) }
 
+    val playlistNames = MutableStateFlow(runCatching {
+        json.decodeFromString<Map<String, String>>(prefs.getString("playlists", "{}")!!)
+    }.getOrDefault(emptyMap()))
+
+    fun newPlaylist(title: String): String {
+        val id = UUID.randomUUID().toString()
+        savePlaylistNames(playlistNames.value + (id to title.trim().take(120)))
+        return id
+    }
+
+    private fun savePlaylistNames(names: Map<String, String>) {
+        playlistNames.value = names
+        prefs.edit().putString("playlists", json.encodeToString(names)).apply()
+    }
+
+    fun forgetPlaylist(id: String, members: List<Video>) {
+        savePlaylistNames(playlistNames.value - id)
+        setPlaylist(members, id, null)
+    }
+
+    fun setPlaylist(members: List<Video>, id: String, name: String?) = scope.launch {
+        val dirty = hashSetOf<Mount>()
+        for (v in members) {
+            val current = if (isClient) remote.firstOrNull { it.key == v.key && it.storageId == v.storageId }?.item
+                else mounts[v.storageId]?.let { m -> m.merged[v.key] ?: Item().takeIf { v.key in m.docs } }
+            if (current == null) continue
+            val old = current.playlists?.get(id)
+            if (old?.name == name) continue
+            val mark = PlaylistEntry(nextTs(old?.ts), name, if (old?.name != null) old.order else System.currentTimeMillis())
+            if (isClient) {
+                Remote.edit(RemoteEdit(v.storageId, v.key, playlists = mapOf(id to mark)))
+                remote = remote.map { if (it.key == v.key && it.storageId == v.storageId)
+                    it.copy(item = it.item.copy(playlists = it.item.playlists.orEmpty() + (id to mark))) else it }
+            } else mounts[v.storageId]?.let { m ->
+                edit(m, v.key) { it.copy(playlists = it.playlists.orEmpty() + (id to mark)) }
+                dirty += m
+            }
+        }
+        publish()
+        if (isClient) Remote.flush() else dirty.forEach(::flush)
+    }
+
     fun requestRedownload(v: Video) = setFlags(v) { it.copy(noAutoRedownload = false, redownload = true) }
 
     /** Write every changed storage now: called on pause, leaving the player, finishing a video. */
@@ -431,6 +491,10 @@ object Lib {
         while (Server.isStreaming(v.key)) delay(5_000)      // a tablet is still reading it
         val f = m.docs[v.key] ?: return
         if (m.merged[v.key] == null) return
+        if (m.merged[v.key]?.playlists.orEmpty().values.any { it.name != null }) {
+            notice.value = "Сначала уберите видео из плейлистов"
+            return
+        }
         val ok = runCatching { m.saf.fileKey(f.doc) == v.key }.getOrDefault(false)
         if (!ok) { notice.value = "Файл не удалён: он изменился или недоступен"; return }
         if (v.meta.thumb == null && !m.ref.plain) keepThumb(m, v)
@@ -499,20 +563,34 @@ object Lib {
         remote = r.items.map { Video(it.key, it.storageId, it.item, null, remotePresent = it.present) }
     }
 
+    private var checkingRemote = false
+    val reconnecting = MutableStateFlow(false)
+
     private suspend fun refreshRemote() {
-        if (Remote.conn.value == null) { remote = emptyList(); publish(); return }
+        if (checkingRemote) return
+        checkingRemote = true
+        try { readRemote() } finally { checkingRemote = false }
+    }
+
+    private suspend fun readRemote() {
+        if (Remote.conn.value == null) { remote = emptyList(); reconnecting.value = false; publish(); return }
         busy.value = !offline
         Remote.flush()
         Remote.library().onSuccess { r ->
+            if (!isClient) return@onSuccess
+            reconnecting.value = false
             offline = false
             setRemote(r); publish()
-            remoteCache.writeText(json.encodeToString(r))
+            val cached = json.encodeToString(r)
+            if (runCatching { remoteCache.readText() }.getOrNull() != cached) remoteCache.writeText(cached)
         }.onFailure {
             if (!offline) notice.value = it.message
+            if (!isClient) return@onFailure
             offline = true
+            reconnecting.value = true
             // the phone is off or out of reach: keep knocking, so its fresh progress replaces the cached copy
             // as soon as it's back — playing from the stale copy would overwrite newer progress
-            if (retry?.isActive != true) retry = scope.launch { delay(5000); retry = null; refreshNow() }
+            if (retry?.isActive != true) retry = scope.launch { delay(5000); retry = null; if (isClient) refreshNow() }
         }
         busy.value = false
     }
@@ -548,9 +626,13 @@ object Lib {
         val before = m.merged[e.key]
         e.watch?.let { w -> if (w.ts > (before?.watch?.ts ?: 0)) edit(m, e.key) { it.copy(watch = w) } }
         e.flags?.let { f -> if (f.ts > (before?.flags?.ts ?: 0)) edit(m, e.key) { it.copy(flags = f) } }
+        e.playlists?.let { marks ->
+            val accepted = marks.filter { (id, mark) -> mark.ts > (before?.playlists?.get(id)?.ts ?: 0) }
+            if (accepted.isNotEmpty()) edit(m, e.key) { it.copy(playlists = it.playlists.orEmpty() + accepted) }
+        }
         publish()
         val v = Video(e.key, e.storageId, m.merged[e.key] ?: Item(), m.docs[e.key])
         if (e.delete) deleteNow(v, FileState.BY_USER)
-        flushSoon(m)
+        if (e.playlists != null) flush(m) else flushSoon(m)
     }
 }

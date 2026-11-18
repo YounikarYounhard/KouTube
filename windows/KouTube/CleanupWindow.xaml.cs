@@ -11,13 +11,25 @@ public partial class CleanupWindow : Window
 {
     public sealed class Row(Video v) : INotifyPropertyChanged
     {
-        bool _delete = true;
+        bool _delete = !Lib.InPlaylist(v);
+        bool _canDelete = !Lib.InPlaylist(v);
         public event PropertyChangedEventHandler? PropertyChanged;
         public Video V { get; } = v;
+        public bool CanDelete
+        {
+            get => _canDelete;
+            set
+            {
+                _canDelete = value;
+                if (!value) Delete = false;
+                PropertyChanged?.Invoke(this, new(nameof(CanDelete)));
+            }
+        }
         public bool Delete { get => _delete; set { _delete = value; PropertyChanged?.Invoke(this, new(nameof(Delete))); PropertyChanged?.Invoke(this, new(nameof(CoverOpacity))); Changed?.Invoke(); } }
         public double CoverOpacity => _delete ? 1 : 0.4;
         public string Title => V.Title;
-        public string Channel => (V.Meta.Channel ?? "") + (Lib.StaleUnwatched(V, Format.Now()) ? " · не смотрели 30+ дней" + (V.Flags.Rating < 0 ? " · не нравится" : "") : "");
+        public string Channel => string.Join(" · ", new[] { V.Meta.Channel, Lib.InPlaylist(V) ? "В плейлисте" : null,
+            Lib.StaleUnwatched(V, Format.Now(), true) ? "не смотрели 30+ дней" : null }.Where(s => !string.IsNullOrEmpty(s)));
         public string Size => Ui.Gb(V.Found?.Size ?? V.Meta.Size ?? 0);
         public object? Cover => new MainWindow.LibRow(V).Cover;
         public Action? Changed;
@@ -25,6 +37,7 @@ public partial class CleanupWindow : Window
 
     /// <summary>What the user chose: 0 later, 1 delete, 2 delete and pick new ones.</summary>
     public int Choice { get; private set; }
+    public bool PlaylistFilesAllowed => IncludePlaylists.IsChecked == true;
     public List<Video> ToDelete => _rows.Where(r => r.Delete).Select(r => r.V).ToList();
     readonly List<Row> _rows;
     readonly Mount _m;
@@ -36,8 +49,16 @@ public partial class CleanupWindow : Window
         _m = m; _stale = stale;
         if (stale) { Title = "Обновить контент"; Hint.Text = "Не просмотрено ни разу по синхронизированной истории, добавлено 30+ дней назад. Сначала подключите носители всех устройств, чтобы история была актуальной. Снимите галочки с нужных видео. Удаление только после нажатия кнопки ниже."; }
         _rows = watched.Select(v => new Row(v)).ToList();
+        IncludePlaylists.Visibility = watched.Any(Lib.InPlaylist) ? Visibility.Visible : Visibility.Collapsed;
         foreach (var r in _rows) r.Changed = Update;
         List.ItemsSource = _rows;
+        Update();
+    }
+
+    void OnPlaylistOption(object sender, RoutedEventArgs e)
+    {
+        if (_rows == null) return;
+        foreach (var row in _rows.Where(r => Lib.InPlaylist(r.V))) row.CanDelete = PlaylistFilesAllowed;
         Update();
     }
 

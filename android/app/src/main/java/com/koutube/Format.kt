@@ -19,12 +19,14 @@ import kotlin.io.encoding.ExperimentalEncodingApi
     val path: String? = null, val subs: List<Sub>? = null, val thumb: String? = null, val addedAt: Long? = null,
     val source: String? = null, val sponsorCutMs: Long? = null, val avatar: String? = null,
     val comments: String? = null, val commentCount: Long? = null,
+    val channelId: String? = null, val viewCount: Long? = null, val likeCount: Long? = null,
     /** YouTube's tags for the video (the PC copies them when it downloads) — search finds a topic by them too. */
     val tags: List<String>? = null,
 )
 
 /** One comment as the PC stores it in .koutube/comments: author, text, likes, time, pinned, by the channel. */
-@Serializable data class Comment(val a: String = "", val t: String = "", val l: Long = 0, val ts: Long? = null, val p: Boolean = false, val u: Boolean = false)
+@Serializable data class Comment(val a: String = "", val t: String = "", val l: Long = 0, val ts: Long? = null, val p: Boolean = false, val u: Boolean = false,
+    val id: String? = null, val parent: String? = null)
 
 @Serializable data class Watch(
     val ts: Long = 0, val status: String = NEW, val posMs: Long = 0, val coverage: String? = null,
@@ -38,7 +40,10 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 /** rating: 1 = 👍, -1 = 👎, 0 = none — what recommendations learn from. */
 @Serializable data class Flags(val ts: Long = 0, val keep: Boolean = false, val noAutoRedownload: Boolean = false, val redownload: Boolean = false, val rating: Int = 0)
 
-@Serializable data class Item(val meta: Meta? = null, val watch: Watch? = null, val file: FileState? = null, val flags: Flags? = null)
+@Serializable data class PlaylistEntry(val ts: Long, val name: String? = null, val order: Long = ts)
+
+@Serializable data class Item(val meta: Meta? = null, val watch: Watch? = null, val file: FileState? = null, val flags: Flags? = null,
+    val playlists: Map<String, PlaylistEntry>? = null)
 
 @Serializable data class Decoder(val mime: String, val hw: Boolean, val maxW: Int, val maxH: Int)
 @Serializable data class Caps(val video: List<Decoder> = emptyList())
@@ -96,9 +101,16 @@ fun merge(files: List<DeviceFile>): MutableMap<String, Item> {
         out[k] = Item(
             newer(a.meta, b.meta) { it.ts }, newer(a.watch, b.watch) { it.ts },
             newer(a.file, b.file) { it.ts }, newer(a.flags, b.flags) { it.ts },
+            mergePlaylists(a.playlists, b.playlists),
         )
     }
     return out
+}
+
+fun mergePlaylists(a: Map<String, PlaylistEntry>?, b: Map<String, PlaylistEntry>?): Map<String, PlaylistEntry>? {
+    if (a.isNullOrEmpty()) return b
+    if (b.isNullOrEmpty()) return a
+    return a + b.filter { (id, entry) -> entry.ts >= (a[id]?.ts ?: 0) }
 }
 
 private inline fun <T> newer(a: T?, b: T?, ts: (T) -> Long): T? = when {

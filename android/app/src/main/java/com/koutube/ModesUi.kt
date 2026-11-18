@@ -38,7 +38,7 @@ fun RoleScreen(current: String?, onServer: () -> Unit, onClient: () -> Unit, onP
         Text("Как будет работать это устройство?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(20.dp))
         RoleCard(Icons.Outlined.PhoneAndroid, "Сервер — видео здесь", current == "server",
-            "Флешка через OTG-переходник или папка в памяти телефона. Смотрите сами и можете раздавать видео планшету по Wi-Fi.", onServer)
+            "Раздавайте видео с флешки или из памяти телефона другим устройствам по Wi-Fi.", onServer)
         Spacer(Modifier.height(12.dp))
         RoleCard(Icons.Outlined.Tablet, "Клиент — смотреть с сервера", current == "client",
             "Для планшета или второго телефона. Видео идёт по Wi-Fi с телефона, где флешка, — сюда ничего не копируется.", onClient)
@@ -46,7 +46,7 @@ fun RoleScreen(current: String?, onServer: () -> Unit, onClient: () -> Unit, onP
         RoleCard(Icons.Outlined.FolderOpen, "Просто плеер", current == "player",
             "Выберите папку с видео — и смотрите. Без компьютера, флешки-библиотеки и Wi-Fi; в папку ничего не записывается.", onPlayer)
         Spacer(Modifier.height(16.dp))
-        Text("Этот вопрос — при каждом запуске. «Сервер» сразу включает раздачу по Wi-Fi.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        Text("Режим можно сменить на главном экране.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
     }
 }
 
@@ -127,6 +127,7 @@ fun ShareSection(withDevices: Boolean = true) {
     val s by Lib.settings.collectAsState()
     val running by Server.running.collectAsState()
     val code by Server.code.collectAsState()
+    val addresses by Server.networkAddresses.collectAsState()
     val devices by Server.devices.collectAsState()
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { Server.start(ctx) }
     ListItem(
@@ -146,11 +147,13 @@ fun ShareSection(withDevices: Boolean = true) {
     if (s.shareWifi && running) Column(Modifier.padding(horizontal = 16.dp)) {
         Text("Код для подключения", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         Text(code, fontSize = 40.sp, fontWeight = FontWeight.Bold, letterSpacing = 8.sp)
-        Text("Адрес: " + Server.addresses().joinToString("  или  ").ifEmpty { "нет сети — включите Wi-Fi или точку доступа" },
+        Text("Адрес: " + addresses.joinToString("  или  ").ifEmpty { "ожидаю Wi-Fi или точку доступа" },
             fontSize = 14.sp)
-        Text("Без зрителей раздача выключится сама через 30 минут.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
-            modifier = Modifier.padding(top = 4.dp))
+
     }
+    ListItem(headlineContent = { Text("Остановить через 30 минут простоя") },
+        supportingContent = { Text("Отключите, чтобы раздача ждала зрителей сколько угодно") },
+        trailingContent = { Switch(s.stopIdleSharing, { on -> Lib.updateSettings { it.copy(stopIdleSharing = on) } }, colors = ytSwitch()) })
     val access by Server.access.collectAsState()
     val storages by Lib.storages.collectAsState()
     var editing by remember { mutableStateOf<String?>(null) }

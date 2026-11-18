@@ -105,12 +105,13 @@ public static class Tools
     {
         var (code, o, e) = Run(exe, args, timeoutMs, cwd, ct);
         // a yt-dlp list whose later page fails (YouTube answers 500 on hashtag pages) still prints what it got: keep it
-        if (code != 0 && !(exe == YtDlp && o.TrimStart().StartsWith('{')) || string.IsNullOrWhiteSpace(o)) throw new IOException(LastLine(e) ?? $"код {code}");
+        if (code != 0 && !(exe == YtDlp && o.TrimStart().StartsWith('{')) || string.IsNullOrWhiteSpace(o)) throw new IOException(e.Split('\n').LastOrDefault(line => line.Contains("ERROR:", StringComparison.OrdinalIgnoreCase))?.Trim() ?? LastLine(e) ?? $"код {code}");
         return JsonDocument.Parse(o).RootElement.Clone();
     }
 
     public static string? LastLine(string s) => s.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0);
 
     /// <summary>YouTube changes often and old yt-dlp versions stop working: update on start, quietly.</summary>
-    public static string UpdateYtDlp() { var (_, o, e) = Run(YtDlp, ["-U"], 120_000); return LastLine(o + "\n" + e) ?? ""; }
+    public static string UpdateYtDlp() => UpdateYtDlp(CancellationToken.None);
+    public static string UpdateYtDlp(CancellationToken ct) { var (_, o, e) = Run(YtDlp, ["-U"], 120_000, ct: ct); return LastLine(o + "\n" + e) ?? ""; }
 }

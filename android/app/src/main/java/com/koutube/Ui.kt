@@ -69,7 +69,7 @@ fun KouTubeTheme(dark: Boolean, content: @Composable () -> Unit) = MaterialTheme
 @Composable
 fun Logo() = Row(verticalAlignment = Alignment.CenterVertically) {
     Box(Modifier.size(30.dp, 21.dp).background(YtRed, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
-        Icon(Icons.Rounded.PlayArrow, null, Modifier.size(17.dp), tint = Color.White)
+        Icon(androidx.compose.ui.res.painterResource(R.drawable.ic_logo_fg), null, Modifier.size(28.dp), tint = Color.White)
     }
     Text("KouTube", Modifier.padding(start = 4.dp), fontWeight = FontWeight.Bold, fontSize = 20.sp, letterSpacing = (-0.8).sp)
 }
@@ -77,7 +77,10 @@ fun Logo() = Row(verticalAlignment = Alignment.CenterVertically) {
 /** The channel picture if the PC fetched one, otherwise YouTube's letter in a coloured circle. */
 @Composable
 fun Avatar(v: Video, size: Int = 36) {
-    val img by produceState<ImageBitmap?>(null, v.meta.avatar, v.meta.channel) { value = Thumbs.avatar(v) }
+    val connection by Lib.reconnecting.collectAsState()
+    val img by produceState<ImageBitmap?>(null, v.storageId, v.meta.avatar, v.meta.channel, connection) {
+        value = Thumbs.avatar(v)
+    }
     img?.let { Image(it, v.meta.channel, Modifier.size(size.dp).clip(CircleShape), contentScale = ContentScale.Crop) } ?: Avatar(v.meta.channel, size)
 }
 
@@ -122,15 +125,6 @@ private fun sorted(list: List<Video>, sort: String) = when (sort) {
     else -> list.sortedByDescending { it.meta.addedAt ?: 0 }
 }
 
-/** "Похожие" from the local collection: same channel first, then shared title words. */
-fun similar(v: Video, all: List<Video>, n: Int = 12): List<Video> {
-    val words = v.title.lowercase().split(Regex("\\W+")).filter { it.length >= 4 }.toSet()
-    return all.asSequence().filter { it.present && it.key != v.key && !it.finished && it.isShort == v.isShort }
-        .map { o -> o to ((if (o.meta.channel == v.meta.channel && v.meta.channel != null) 3 else 0) +
-            o.title.lowercase().split(Regex("\\W+")).count { it in words }) }
-        .sortedByDescending { it.second }.take(n).map { it.first }.toList()
-}
-
 // ---------- root ----------
 
 @Composable
@@ -149,8 +143,19 @@ fun Root() {
     LaunchedEffect(notice) { notice?.let { snack.showSnackbar(it); Lib.notice.value = null } }
 
     // a Short always opens in the Shorts tab, like YouTube: that one first, then the rest in our "recommended" order
-    val play: (List<Video>, Video) -> Unit = { list, v ->
-        if (v.isShort) { search = null; tab = 1; Playback.play(shortsFeed(all, v), v) } else Playback.play(list, v)
+    val playbackScope = rememberCoroutineScope()
+    var opening by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val play: (List<Video>, Video) -> Unit = { _, v ->
+        opening?.cancel()
+        if (v.isShort) {
+            search = null
+            tab = 1
+            Playback.play(shortsFeed(all, v), v)
+        } else opening = playbackScope.launch {
+            val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { recommended(v, all) }
+            if (!Lib.roleChosen.value || Lib.settings.value.role == "server") return@launch
+            Playback.play(listOf(v) + next, v)
+        }
     }
     var adding by remember { mutableStateOf<Uri?>(null) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -165,16 +170,22 @@ fun Root() {
     // every start of the app asks what this device does today
     val chosen by Lib.roleChosen.collectAsState()
     if (!chosen)
-        return RoleScreen(s.role, onServer = { Lib.chooseRole("server"); if (storageList.isEmpty()) pick.launch(null) },
+        return RoleScreen(s.role, onServer = { Lib.chooseRole("server") },
             onClient = { Lib.chooseRole("client") },
             onPlayer = { Lib.chooseRole("player"); if (storageList.none()) pick.launch(null) })
     if (s.role == "client" && conn == null) return ConnectScreen(onBack = { Lib.roleChosen.value = false })
 
-    val short = playing?.isShort == true
+    if (s.role == "server") return ServerHome { pick.launch(null) }
+    val playlistPlaying by Playback.playlistMode.collectAsState()
+    if (playing?.isShort == true && !playlistPlaying && tab == 1) return ShortsPlayer { Playback.close(); tab = 0; Lib.newFeed() }
+
+    val short = playing?.isShort == true && !playlistPlaying
     val mini = playing != null && minimized && !short
     // leaving the Shorts tab ends the Short, like YouTube
     val goTab: (Int) -> Unit = { i -> if (tab == 1 && i != 1 && short) Playback.close(); search = null; tab = i; if (i == 0) Lib.newFeed() }
     LaunchedEffect(short, tab) { if (short && tab != 1) Playback.close() }
+    BackHandler(tab == 3 && search == null) { tab = 2 }
+    BackHandler(search != null && (playing == null || mini)) { search = null }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         Scaffold(
@@ -182,12 +193,17 @@ fun Root() {
             contentWindowInsets = WindowInsets(0),            // each screen's top bar takes the status bar itself
             bottomBar = { if (search == null) TabBar(tab, dark = tab == 1 && short, onTab = goTab) },
         ) { pad ->
-            Box(Modifier.padding(pad).fillMaxSize()) {
+            Column(Modifier.padding(pad).fillMaxSize()) {
+                if (s.role == "client") {
+                    val reconnecting by Lib.reconnecting.collectAsState()
+                    if (reconnecting) Text("Восстанавливаю связь с сервером…", Modifier.fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant).statusBarsPadding().padding(12.dp))
+                }
                 when {
                     search != null -> SearchScreen(search!!, { search = it }, { search = null }, all, play)
                     tab == 0 -> HomeScreen(all, play, onSearch = { search = "" }, onAdd = { pick.launch(null) })
                     tab == 1 -> ShortsTab(all, onClose = { goTab(0) })
-                    tab == 2 -> HistoryScreen(all, play)
+                    tab == 2 -> PersonalLibrary(all, play, onSettings = { tab = 3 })
                     else -> SettingsScreen(onAdd = { pick.launch(null) })
                 }
             }
@@ -195,7 +211,6 @@ fun Root() {
         if (mini) FloatingPlayer(maxWidth, maxHeight, aboveTabs = search == null, onClose = Playback::close)
         if (playing != null && !mini && !short) PlayerScreen(all, play, onClose = { Playback.close(); Lib.newFeed() })
     }
-    BackHandler(search != null) { search = null }
 }
 
 /**
@@ -210,7 +225,7 @@ private fun TabBar(tab: Int, dark: Boolean, onTab: (Int) -> Unit) {
         HorizontalDivider(color = if (dark) Color.White.copy(alpha = 0.12f) else MaterialTheme.colorScheme.outline, thickness = 0.5.dp)
         Row(Modifier.fillMaxWidth().height(48.dp), horizontalArrangement = Arrangement.Center) {
             listOf(Triple(Icons.Filled.Home, Icons.Outlined.Home, "Главная"), Triple(Icons.Filled.Slideshow, Icons.Outlined.Slideshow, "Shorts"),
-                Triple(Icons.Filled.History, Icons.Outlined.History, "История"), Triple(Icons.Filled.Settings, Icons.Outlined.Settings, "Настройки"))
+                Triple(Icons.Filled.VideoLibrary, Icons.Outlined.VideoLibrary, "Библиотека"))
                 .forEachIndexed { i, (on, off, label) ->
                     Column(Modifier.then(if (wide) Modifier.width(96.dp) else Modifier.weight(1f)).fillMaxHeight()
                         .clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
@@ -229,7 +244,10 @@ private fun TabBar(tab: Int, dark: Boolean, onTab: (Int) -> Unit) {
 @Composable
 fun Thumb(v: Video, modifier: Modifier = Modifier) {
     val better by Thumbs.version.collectAsState()
-    val img by produceState<ImageBitmap?>(null, v.key, v.present, better) { value = Thumbs.get(v) }
+    val reconnecting by Lib.reconnecting.collectAsState()
+    val img by produceState<ImageBitmap?>(null, v.storageId, v.key, v.present, better, reconnecting) {
+        if (!reconnecting) value = Thumbs.get(v)
+    }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
         img?.let { Image(it, null, Modifier.matchParentSize(), contentScale = ContentScale.Crop, alpha = if (v.finished || !v.present) 0.5f else 1f) }
             ?: Icon(Icons.Rounded.Movie, null, Modifier.align(Alignment.Center).size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
@@ -277,19 +295,22 @@ fun VideoCard(v: Video, onClick: () -> Unit, compact: Boolean = false) {
 fun VideoMenu(v: Video, tint: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
     var open by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
+    var playlists by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }) { Icon(Icons.Rounded.MoreVert, "Ещё", tint = tint) }
         DropdownMenu(open, { open = false }) {
+            DropdownMenuItem({ Text("Сохранить в плейлист") }, { open = false; playlists = true })
             if (v.present && !v.finished) DropdownMenuItem({ Text("Отметить просмотренным") }, { open = false; Lib.markWatched(v, true) },
                 leadingIcon = { Icon(Icons.Rounded.CheckCircle, null) })
             if (v.finished || v.started) DropdownMenuItem({ Text("Отметить непросмотренным") }, { open = false; Lib.markWatched(v, false) },
                 leadingIcon = { Icon(Icons.Rounded.Replay, null) })
-            if (v.present) DropdownMenuItem({ Text("Удалить видео") }, { open = false; confirm = true }, leadingIcon = { Icon(Icons.Rounded.Delete, null) })
+            if (v.present && !v.inPlaylist && !Lib.isClient) DropdownMenuItem({ Text("Удалить видео") }, { open = false; confirm = true }, leadingIcon = { Icon(Icons.Rounded.Delete, null) })
             if (!v.present) DropdownMenuItem({ Text(if (v.flags.redownload) "Будет скачано снова" else "Скачать снова") },
                 { open = false; Lib.requestRedownload(v); Lib.notice.value = "KouTube на ПК скачает видео при следующем подключении к компьютеру" },
                 enabled = !v.flags.redownload, leadingIcon = { Icon(Icons.Rounded.Download, null) })
         }
     }
+    if (playlists) SaveToPlaylist(v) { playlists = false }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false },
         title = { Text("Удалить видео?") },
         text = { Text("Файл «${v.title}» будет удалён с носителя. Запись останется в истории, и само видео не скачается снова автоматически.") },
@@ -299,10 +320,12 @@ fun VideoMenu(v: Video, tint: Color = MaterialTheme.colorScheme.onSurfaceVariant
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TopBar(title: String, onSearch: (() -> Unit)?, actions: @Composable RowScope.() -> Unit = {}) {
+internal fun TopBar(title: String, onSearch: (() -> Unit)?, onBack: (() -> Unit)? = null, actions: @Composable RowScope.() -> Unit = {}) {
     val busy by Lib.busy.collectAsState()
     Column {
-        TopAppBar(title = { if (title == "KouTube") Logo() else Text(title, fontWeight = FontWeight.Bold) }, expandedHeight = 52.dp, actions = {
+        TopAppBar(title = { if (title == "KouTube") Logo() else Text(title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = { onBack?.let { IconButton(it) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Назад") } } },
+            expandedHeight = 52.dp, actions = {
             actions()
             onSearch?.let { IconButton(it) { Icon(Icons.Outlined.Search, "Поиск") } }
         }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
@@ -362,10 +385,6 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
     val storages by Lib.storages.collectAsState()
     // watched to the end: out of the feed, it lives on in «История»
     val videos = all.filter { it.present && !it.isShort && !it.finished }
-    val cont = videos.filter { it.started }.sortedByDescending { it.watch.lastWatchedAt ?: 0 }
-    // every video is somewhere in the feed, watched ones at the bottom. A "continue" shelf only pays off in a big
-    // library; in a small one it would just repeat the cards below, so started videos simply lead the feed
-    val shelf = cont.isNotEmpty() && videos.size > 8
     val feedSeed by Lib.feedVisit.collectAsState()
     val recommended by produceState<List<Video>>(emptyList(), all, feedSeed) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { localFeed(all, feedSeed) }
@@ -373,7 +392,6 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
     val byState = recommended
     val list = when (filter) {
         "all" -> sorted(videos, s.sort)
-        "continue" -> cont
         "new" -> sorted(videos.filter { it.watch.status == Watch.NEW }, s.sort)
         else -> byState
     }
@@ -392,18 +410,8 @@ fun HomeScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onSearch: (
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = if (wide) 0.dp else 12.dp, vertical = 4.dp).padding(bottom = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("home" to "Главная", "all" to "Все видео", "continue" to "Продолжить", "new" to "Не просмотрено").forEach { (k, t) ->
+                    listOf("home" to "Главная", "all" to "Все видео", "new" to "Не просмотрено").forEach { (k, t) ->
                         Chip(t, filter == k) { filter = k }
-                    }
-                }
-            }
-            // the phone with the videos: sharing to the tablet right here, not buried in the settings
-            if (filter == "home" && s.role == "server") item(span = { GridItemSpan(maxLineSpan) }) { Column { ShareSection(withDevices = false) } }
-            if (filter == "home" && shelf) item(span = { GridItemSpan(maxLineSpan) }) {
-                Column {
-                    Text("Продолжить просмотр", Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), style = MaterialTheme.typography.titleMedium)
-                    LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(cont, key = { it.storageId + it.key }) { v -> VideoCard(v, { play(cont, v) }, compact = true) }
                     }
                 }
             }
@@ -519,11 +527,11 @@ private fun statusOf(v: Video) = when {
 }
 
 @Composable
-fun HistoryScreen(all: List<Video>, play: (List<Video>, Video) -> Unit) {
+fun HistoryScreen(all: List<Video>, play: (List<Video>, Video) -> Unit, onBack: () -> Unit) {
     var q by rememberSaveable { mutableStateOf("") }
     var kind by rememberSaveable { mutableStateOf("all") }
     val needle = unFullwidth(q.trim()).lowercase()
-    val seen = all.filter { it.watch.lastWatchedAt != null || it.finished || !it.present }
+    val seen = all.filter { it.watch.lastWatchedAt != null || it.finished || it.started }
     val list = seen.filter { when (kind) { "video" -> !it.isShort; "short" -> it.isShort; else -> true } }
         .filter { v -> needle.isEmpty() || listOfNotNull(v.title, v.meta.channel).any { unFullwidth(it).lowercase().contains(needle) } }
         .sortedByDescending(::seenAt)
@@ -531,7 +539,7 @@ fun HistoryScreen(all: List<Video>, play: (List<Video>, Video) -> Unit) {
     val videos = list.filter { it.present && !it.isShort }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
         item {
-            Text("История", Modifier.statusBarsPadding().padding(start = 16.dp, top = 16.dp, bottom = 12.dp), fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            TopBar("История", null, onBack = onBack)
             TextField(q, { q = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp), singleLine = true,
                 placeholder = { Text("Искать в истории просмотра") }, leadingIcon = { Icon(Icons.Outlined.Search, null) },
                 trailingIcon = { if (q.isNotEmpty()) IconButton({ q = "" }) { Icon(Icons.Rounded.Close, "Очистить") } },
@@ -559,9 +567,10 @@ fun HistoryScreen(all: List<Video>, play: (List<Video>, Video) -> Unit) {
 }
 
 @Composable
-private fun HistoryRow(v: Video, onClick: () -> Unit) {
+internal fun HistoryRow(v: Video, actions: @Composable () -> Unit = { VideoMenu(v) }, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, top = 6.dp, bottom = 6.dp)) {
-        Box(Modifier.width(168.dp).aspectRatio(16 / 9f).clip(RoundedCornerShape(8.dp))) {
+        val thumbWidth = if (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 400) 126.dp else 168.dp
+        Box(Modifier.width(thumbWidth).aspectRatio(16 / 9f).clip(RoundedCornerShape(8.dp))) {
             Thumb(v, Modifier.matchParentSize())
             v.meta.durationMs?.let { Badge(fmtTime(it), Modifier.align(Alignment.BottomEnd)) }
             val f = if (v.finished) 1f else v.progress
@@ -575,43 +584,63 @@ private fun HistoryRow(v: Video, onClick: () -> Unit) {
                 modifier = Modifier.padding(top = 4.dp))
             statusOf(v).takeIf { it.isNotEmpty() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        VideoMenu(v)
+        actions()
     }
 }
 
 /** The start of a word that survives its endings: "путешествие" → "путешест", which also finds "путешествия", "путешествую". */
-private fun stem(w: String) = if (w.length <= 4) w else w.take(maxOf(4, Math.round(w.length * 0.72f)))
+private val wordBreak = Regex("[^\\p{L}\\p{N}]+")
+internal fun searchWords(s: String) = unFullwidth(s).lowercase().replace('ё', 'е').split(wordBreak).filter { it.isNotEmpty() }
 
-private val wordBreak = Regex("[^\\p{L}\\p{Nd}]+")
-private fun words(s: String) = unFullwidth(s).lowercase().replace('ё', 'е').split(wordBreak).filter { it.isNotEmpty() }
+internal data class SearchDocument(val id: String, val title: List<String>, val channel: List<String>,
+                                   val tags: List<String>, val addedAt: Long) {
+    constructor(v: Video) : this(v.storageId + "/" + v.key, searchWords(v.title), searchWords(v.meta.channel.orEmpty()),
+        (v.meta.tags.orEmpty() + v.meta.category.orEmpty()).flatMap(::searchWords), v.meta.addedAt ?: 0)
 
-/**
- * Search like a person means it: every word of the query (in any form) appears in the title, channel, category
- * or the video's YouTube tags — "путешествие" finds "Путешествия по Японии" and a video tagged #путешествия.
- */
-fun matches(v: Video, query: String): Boolean {
-    val normalized = unFullwidth(query).trim().lowercase().replace('ё', 'е')
-    val hay = (listOfNotNull(v.title, v.meta.channel, v.meta.category) + v.meta.tags.orEmpty()).flatMap(::words)
-    val whole = unFullwidth(listOfNotNull(v.title, v.meta.channel).joinToString(" ")).lowercase()
-    return whole.replace('ё', 'е').contains(normalized) || words(normalized).all { q -> stem(q).let { st -> hay.any { it.startsWith(st) } } }
+    fun rank(query: List<String>): Int {
+        if (query.isEmpty()) return 0
+        val phrase = query.joinToString(" ")
+        val text = title.joinToString(" ")
+        if (text == phrase) return 200
+        if (title.size >= query.size && title.take(query.size) == query) return 170
+        if ((" " + text + " ").contains(" " + phrase + " ")) return 150
+        if (query.all { it in title }) return 130
+        if (query.all { q -> title.any { it.startsWith(q) } }) return 110
+        if (channel == query) return 100
+        val all = title + channel + tags
+        if (query.all { q -> all.any { it.startsWith(q) } }) return 80
+        return if (query.all { q ->
+            val stem = if (q.length >= 6) q.dropLast(2) else q
+            all.any { it.startsWith(stem) }
+        }) 45 else 0
+    }
 }
+
+fun matches(v: Video, query: String): Boolean = SearchDocument(v).rank(searchWords(query)) > 0
 
 @Composable
 fun SearchScreen(q: String, onQuery: (String) -> Unit, onBack: () -> Unit, all: List<Video>, play: (List<Video>, Video) -> Unit) {
-    val needle = unFullwidth(q.trim()).lowercase()
-    val index = remember(all) { all.filter { it.present && !it.finished } }
-    val found by produceState<List<Video>>(emptyList(), needle, index) {
-        value = emptyList()
+    val needle = searchWords(q)
+    val available = remember(all) { all.filter { it.present && !it.finished } }
+    val index = remember(available) { available.map(::SearchDocument) }
+    val lookup = remember(available) { available.associateBy { it.storageId + "/" + it.key } }
+    val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val hits by produceState<Pair<List<String>, List<String>>?>(null, needle, index) {
+        if (needle.isEmpty()) return@produceState
         kotlinx.coroutines.delay(180)
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            if (needle.isEmpty()) emptyList() else index.asSequence().filter { matches(it, needle) }
-                .sortedWith(compareByDescending<Video> { searchScore(it, needle) }.thenByDescending { it.meta.addedAt ?: 0 }).toList()
+        val keys = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            index.map { it to it.rank(needle) }.filter { it.second > 0 }
+                .sortedWith(compareByDescending<Pair<SearchDocument, Int>> { it.second }.thenByDescending { it.first.addedAt })
+                .map { it.first.id }
         }
+        value = needle to keys
     }
+    LaunchedEffect(hits?.first) { if (hits?.first == needle && hits?.second?.isNotEmpty() == true) grid.scrollToItem(0) }
+    val found = hits?.second.orEmpty().mapNotNull(lookup::get)
     val videos = found.filter { !it.isShort }
-    val shorts = found.filter { it.isShort && it.present }
-    // before typing: the channels in the library, like YouTube's suggestions — it works without internet
-    val channels = remember(index) { index.groupBy { it.meta.channel }.filterKeys { it != null }.entries.sortedByDescending { it.value.size } }
+    val shorts = found.filter { it.isShort }
+    val channels = remember(available) { available.groupBy { it.meta.channel }.filterKeys { it != null }.entries.sortedByDescending { it.value.size } }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     val wide = wideFeed()
@@ -620,6 +649,8 @@ fun SearchScreen(q: String, onQuery: (String) -> Unit, onBack: () -> Unit, all: 
             IconButton(onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Назад") }
             TextField(q, onQuery, Modifier.weight(1f).height(52.dp).focusRequester(focus), singleLine = true,
                 placeholder = { Text("Поиск по библиотеке") },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { keyboard?.hide() }),
                 trailingIcon = { if (q.isNotEmpty()) IconButton({ onQuery("") }) { Icon(Icons.Rounded.Close, "Очистить") } },
                 shape = RoundedCornerShape(26.dp), colors = TextFieldDefaults.colors(focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant))
@@ -627,7 +658,7 @@ fun SearchScreen(q: String, onQuery: (String) -> Unit, onBack: () -> Unit, all: 
         if (needle.isEmpty()) {
             LazyColumn {
                 items(channels, key = { "c" + it.key }) { (ch, vids) ->
-                    Row(Modifier.fillMaxWidth().clickable { onQuery(ch!!) }.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable { onQuery(ch!!); keyboard?.hide() }.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Avatar(vids.first(), 36)
                         Column(Modifier.padding(start = 16.dp).weight(1f)) {
                             Text(ch!!, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -640,16 +671,56 @@ fun SearchScreen(q: String, onQuery: (String) -> Unit, onBack: () -> Unit, all: 
             }
             return
         }
-        if (found.isEmpty()) { Text("Ничего не нашлось", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant); return }
-        LazyVerticalGrid(GridCells.Adaptive(330.dp), contentPadding = PaddingValues(start = if (wide) 16.dp else 0.dp, end = if (wide) 16.dp else 0.dp, bottom = 16.dp),
+        if (found.isEmpty() && hits?.first != needle) {
+            LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
+        } else if (found.isEmpty()) Text("Ничего не нашлось", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyVerticalGrid(GridCells.Adaptive(330.dp), state = grid, contentPadding = PaddingValues(start = if (wide) 16.dp else 0.dp, end = if (wide) 16.dp else 0.dp, bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(if (wide) 16.dp else 0.dp)) {
             if (shorts.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { ShortsShelf(shorts, wide, play) }
-            items(videos, key = { it.storageId + it.key }) { v -> VideoCard(v, { if (v.present) play(videos.filter { it.present }, v) }) }
+            items(videos, key = { it.storageId + it.key }) { v -> VideoCard(v, { if (v.present) { keyboard?.hide(); play(videos, v) } }) }
         }
     }
 }
 
 // ---------- settings ----------
+
+@Composable
+private fun ServerHome(onAdd: () -> Unit) {
+    Column {
+        TopBar("Сервер", null) { ModeChip() }
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp).navigationBarsPadding()) {
+            Section("Раздача")
+            ShareSection()
+            StorageSettings(onAdd)
+        }
+    }
+}
+
+@Composable
+private fun StorageSettings(onAdd: () -> Unit) {
+    val storages by Lib.storages.collectAsState()
+    Section("Где лежат видео")
+    val removable by Lib.removableVolumes.collectAsState()
+    if (removable > 0) Text("Съёмный накопитель обнаружен. Новую флешку выберите один раз.", Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+    storages.forEach { st ->
+        ListItem(
+            headlineContent = { Text(st.name) },
+            supportingContent = {
+                Text((if (st.online) "${st.count} видео" else st.error ?: "недоступно") + " · папки: " +
+                    st.folders.joinToString { (if (it.path == ".") "вся папка" else it.path) + roleName(it.role) })
+            },
+            leadingContent = { Icon(if (st.online) Icons.Rounded.Usb else Icons.Rounded.UsbOff, null) },
+            trailingContent = { IconButton({ Lib.removeStorage(st.id) }) { Icon(Icons.Rounded.Close, "Отключить") } },
+        )
+    }
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onAdd) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(6.dp)); Text("Флешка или папка") }
+        OutlinedButton({ Lib.refresh(force = true) }) { Text("Обновить") }
+    }
+    Text("Флешка — через OTG-переходник: в окне выбора откройте её и нажмите «Использовать эту папку». " +
+        "Можно добавить несколько флешек и папок — всё покажется одной библиотекой.",
+        Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
 
 @Composable
 fun SettingsScreen(onAdd: () -> Unit) {
@@ -659,25 +730,7 @@ fun SettingsScreen(onAdd: () -> Unit) {
         TopBar("Настройки", null)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
             if (Lib.isClient) { Section("Сервер"); ClientSection() } else {
-            Section("Где лежат видео")
-            storages.forEach { st ->
-                ListItem(
-                    headlineContent = { Text(st.name) },
-                    supportingContent = {
-                        Text((if (st.online) "${st.count} видео" else st.error ?: "недоступно") + " · папки: " +
-                            st.folders.joinToString { (if (it.path == ".") "вся папка" else it.path) + roleName(it.role) })
-                    },
-                    leadingContent = { Icon(if (st.online) Icons.Rounded.Usb else Icons.Rounded.UsbOff, null) },
-                    trailingContent = { IconButton({ Lib.removeStorage(st.id) }) { Icon(Icons.Rounded.Close, "Отключить") } },
-                )
-            }
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onAdd) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(6.dp)); Text("Флешка или папка") }
-                OutlinedButton({ Lib.refresh(force = true) }) { Text("Обновить") }
-            }
-            Text("Флешка — через OTG-переходник: в окне выбора откройте её и нажмите «Использовать эту папку». " +
-                "Можно добавить несколько флешек и папок — всё покажется одной библиотекой.",
-                Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            StorageSettings(onAdd)
 
             Section("Просмотренные видео")
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -706,9 +759,7 @@ fun SettingsScreen(onAdd: () -> Unit) {
                             Row(Modifier.fillMaxWidth().clickable {
                                 modes = false
                                 if (s.role != k) {
-                                    if (!Lib.isClient) Server.stop(App.instance)
-                                    Lib.updateSettings { it.copy(role = k, shareWifi = false) }
-                                    Lib.refresh(force = true)
+                                    Lib.chooseRole(k)
                                 }
                             }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 RadioButton((s.role ?: "server") == k, null); Text(t, Modifier.padding(start = 8.dp))
@@ -720,7 +771,6 @@ fun SettingsScreen(onAdd: () -> Unit) {
             Section("Воспроизведение и лента")
             Toggle("Следующее видео автоматически", "Выключите, чтобы останавливаться в конце ролика", s.autoplay) { on ->
                 Lib.updateSettings { it.copy(autoplay = on) }
-                if (!Playback.sleeping) Playback.player.pauseAtEndOfMediaItems = !on
             }
             Toggle("Субтитры по умолчанию", null, s.defaultSubtitles) { on -> Lib.updateSettings { it.copy(defaultSubtitles = on) }; Playback.setSubtitles(on) }
             Toggle("Полка Shorts на главной", null, s.showShorts) { on -> Lib.updateSettings { it.copy(showShorts = on) } }

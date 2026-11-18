@@ -36,6 +36,10 @@ public record QueueItem
     public string? ThumbUrl { get; init; }
     public List<Choice>? Variants { get; init; }
     public List<string>? Tags { get; init; }
+    public string? ChannelId { get; init; }
+    public long? ViewCount { get; init; }
+    public long? LikeCount { get; init; }
+    public Dictionary<string, PlaylistEntry>? Playlists { get; init; }
 
     /// <summary>Expected size on the stick: SponsorBlock cuts shrink it roughly in proportion.</summary>
     public long Expected => DurationSec > 0 ? (long)(Bytes * Math.Max(0.05, 1 - SbCutSec / DurationSec)) : Bytes;
@@ -139,7 +143,35 @@ public static class Downloader
     public static event Action? OnChanged;
     public static void Changed() { Save(); OnChanged?.Invoke(); }
 
-    static Process? _proc;
+    static readonly SemaphoreSlim ExtractorGate = new(1, 1);
+    static long _lastExtractor;
+    static long _slowUntil;
+    static bool _queueDirty;
+    static long _lastCheckpoint;
+
+    // Separate the start of each extractor: even small videos can trigger several requests before the file starts.
+    static async Task PaceExtractor(CancellationToken ct)
+    {
+        await ExtractorGate.WaitAsync(ct);
+        try
+        {
+            var now = Environment.TickCount64;
+            var spacing = now < _slowUntil ? 5000 : 1100;
+            var wait = _lastExtractor + spacing - now;
+            if (wait > 0) await Task.Delay((int)wait, ct);
+            _lastExtractor = Environment.TickCount64;
+        }
+        finally { ExtractorGate.Release(); }
+    }
+
+    public static void Checkpoint()
+    {
+        if (!_queueDirty || Environment.TickCount64 - _lastCheckpoint < 2_000) return;
+        Save();
+        _lastCheckpoint = Environment.TickCount64;
+        _queueDirty = false;
+        OnChanged?.Invoke();
+    }
     static readonly SemaphoreSlim StorageWriter = new(1, 1);
     static bool _cancelAll;
     static CancellationTokenSource? _cts;
@@ -172,13 +204,21 @@ public static class Downloader
     static readonly Regex Single = new(@"(?:youtube\.com/(?:watch\?.*v=|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})");
 
     /// <summary>Video, Shorts, playlist or channel link → the videos behind it (just ids and titles, fast).</summary>
-    public static List<(string Id, string Url, string? Title, string Kind)> Expand(string url, int limit)
+    static (List<(string Id, string Url, string? Title, string Kind, double Seconds)> Videos, string? PlaylistTitle) Expand(string url, int limit)
     {
         url = url.Trim();
         if (Single.Match(url) is { Success: true } m)
-            return [(m.Groups[1].Value, url, null, url.Contains("/shorts/") ? "short" : "video")];
-        var j = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-end", limit.ToString(), "--no-warnings", url], 180_000);
-        var outList = new List<(string, string, string?, string)>();
+            return ([(m.Groups[1].Value, url, null, url.Contains("/shorts/") ? "short" : "video", 0)], null);
+        JsonElement j;
+        try
+        {
+            j = Tools.Json(Tools.YtDlp, ["--flat-playlist", "-J", "--playlist-end", limit.ToString(), "--no-warnings", url], 180_000);
+        }
+        catch (IOException) when (YoutubePlaylistId(url) is { } playlist && Account.Enabled)
+        {
+            j = Account.Feed("https://www.youtube.com/playlist?list=" + playlist[3..], limit);
+        }
+        var outList = new List<(string, string, string?, string, double)>();
         void Walk(JsonElement e)
         {
             if (!e.TryGetProperty("entries", out var es) || es.ValueKind != JsonValueKind.Array) return;
@@ -189,18 +229,21 @@ public static class Downloader
                 if (id is not { Length: 11 }) continue;
                 var u = x.TryGetProperty("url", out var uu) ? uu.GetString() ?? "" : "";
                 outList.Add((id, u.StartsWith("http") ? u : "https://www.youtube.com/watch?v=" + id,
-                    x.TryGetProperty("title", out var t) ? t.GetString() : null, u.Contains("/shorts/") ? "short" : "video"));
+                    x.TryGetProperty("title", out var t) ? t.GetString() : null, u.Contains("/shorts/") ? "short" : "video",
+                    x.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0));
             }
         }
         Walk(j);
-        return outList.DistinctBy(x => x.Item1).Take(limit).ToList();
+        return (outList.DistinctBy(x => x.Item1).Take(limit).ToList(), j.TryGetProperty("title", out var title) ? title.GetString() : null);
     }
 
     /// <summary>Full info for one video: formats with sizes, our pick, the alternatives and the SponsorBlock cut.</summary>
     public static async Task<QueueItem> Probe(string url, string kind, string? source, string? reason, string storageId, bool account = false, CancellationToken ct = default)
     {
+        await PaceExtractor(ct);
         var j = await Task.Run(() => Tools.Json(Tools.YtDlp, [.. account ? Account.CookieArgs() : [], "-J", "--no-playlist", "--no-warnings", url], 180_000, ct: ct), ct);
         string? S(string n) => j.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        long? N(string name) => j.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : null;
         var id = S("id")!;
         var sec = j.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : 0;
         var fs = j.GetProperty("formats").EnumerateArray().Select(YtFormat.From).ToList();
@@ -214,6 +257,7 @@ public static class Downloader
         return new QueueItem
         {
             Id = id, Url = S("webpage_url") ?? url, Title = S("title") ?? id, Channel = S("channel") ?? S("uploader"), DurationSec = sec,
+            ChannelId = S("channel_id"), ViewCount = N("view_count"), LikeCount = N("like_count"),
             Published = date is { Length: 8 } ? $"{date[..4]}-{date[4..6]}-{date[6..]}" : null,
             Kind = isShort ? "short" : "video", Spec = pick?.Spec, Label = pick?.Label, Bytes = pick?.Bytes ?? 0, Approx = pick?.Approx ?? true,
             SbCutSec = cut, SbMarked = marked, StorageId = storageId, Source = source, Reason = reason,
@@ -291,7 +335,7 @@ public static class Downloader
 
     // ---------- the run ----------
 
-    public static void Stop() { _cts?.Cancel(); try { _proc?.Kill(true); } catch (Exception) { } }
+    public static void Stop() => _cts?.Cancel();
 
     public static void CancelAll()
     {
@@ -308,97 +352,132 @@ public static class Downloader
         _cancelAll = false;
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
+        long reservedTemp = 0;
         // null = done, or not worth another try; otherwise yt-dlp's raw error
-        async Task<string?> Go(QRow row, bool account)
+        async Task<string?> Go(QRow row, bool fallback = false, bool compatible = false, bool final = false)
         {
             var m = Lib.Mounts.FirstOrDefault(x => x.Ref.StorageId == row.Item.StorageId);
             if (m == null || !m.Online) { Set(row, Q.Failed, "носитель не подключён"); return null; }
+            long reservation = 0;
             try
             {
-                if (row.Item.Spec == null)
+                if (row.Item.Spec == null && !fallback && !compatible)
                 {
                     Set(row, Q.Working, "выбираю формат…");
                     var it = row.Item;
-                    var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!, account, token);
+                    var q = await Probe(it.Url, it.Kind, it.Source, it.Reason, it.StorageId!, false, token);
                     token.ThrowIfCancellationRequested();
-                    Ui.OnUi(() => row.Item = q with { Include = true, Status = q.Status == Q.Failed ? Q.Failed : Q.Pending });
+                    Ui.OnUi(() => row.Item = q with { Include = true, Playlists = it.Playlists, Status = q.Status == Q.Failed ? Q.Failed : Q.Pending });
                     if (q.Status == Q.Failed) return null;
                 }
                 if (!Check(m).Ok) { Set(row, Q.Failed, "нет места — резерв нарушился бы"); return null; }
+                var tempDrive = Path.GetPathRoot(Lib.TempDir);
+                if (tempDrive != null && new DriveInfo(tempDrive).AvailableFreeSpace - reservedTemp < (512L << 20) + 2 * row.Item.Expected)
+                { Set(row, Q.Failed, "Мало свободного места во временной папке загрузок"); return null; }
+                reservation = Math.Max(64L << 20, 2 * row.Item.Expected);
+                reservedTemp += reservation;
                 string? note;
-                try { note = await One(row, m, token, account); }
-                catch (SponsorCutException) when (!row.Item.WithAds)
+                try { note = await One(row, m, token, fallback, compatible); }
+                catch (SponsorCutException) when (!row.Item.WithAds && !compatible)
                 {
                     token.ThrowIfCancellationRequested();
                     Ui.OnUi(() => row.Item = row.Item with { WithAds = true, SbCutSec = 0, SbMarked = null, Status = Q.Pending });
                     Changed();
                     if (!Check(m).Ok) throw new IOException("Для полной версии с рекламой не хватает места");
-                    note = await One(row, m, token, account);
+                    note = await One(row, m, token, fallback, compatible);
                 }
                 Set(row, Q.Done, row.Item.WithAds ? "Сохранено с рекламой: вырезать сегменты не удалось. " + note : note ?? "");
                 return null;
             }
-            catch (OperationCanceledException) { Set(row, Q.Pending, "остановлено — продолжится с того же места"); return null; }
-            catch (Exception e) { Set(row, Q.Failed, Human(e.Message)); return e.Message; }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { Set(row, Q.Pending, "остановлено — продолжится с того же места"); return null; }
+            catch (Exception e)
+            {
+                if (!final && Passing(e.Message))
+                {
+                    if (Bot(e.Message) || e.Message.Contains("429")) _slowUntil = Environment.TickCount64 + 120_000;
+                    Set(row, Q.Pending, "Временный сбой. Повторю автоматически.");
+                    return e.Message;
+                }
+                Set(row, Q.Failed, Human(e.Message));
+                return e.Message;
+            }
+            finally { reservedTemp -= reservation; }
         }
         try
         {
             var again = new List<(QRow Row, string Error)>();
-            void Done() => status($"Готово {Rows.Count(r => r.Item.Status == Q.Done)} из {Rows.Count(r => r.Item.Include)}");
-            // a Short is a few MB, yet each one waits on YouTube for seconds: six of them at a time; videos go one by one
             using var lanes = new SemaphoreSlim(6);
-            var shorts = new List<Task>();
-            async Task Lane(QRow row)
+            var pending = Rows.Where(r => r.Item.Include && r.Item.Status == Q.Pending).ToList();
+            // A repeated URL can target two storages, but its resumable work directory is shared.
+            var groups = pending.GroupBy(r => r.Item.Id).Select(g => new Queue<QRow>(g)).ToList();
+            while (groups.Count > 0 && !token.IsCancellationRequested)
             {
-                try { if (await Go(row, false) is { } e && Passing(e)) lock (again) again.Add((row, e)); Done(); }
-                finally { lanes.Release(); }
-            }
-            foreach (var row in Rows.ToList())
-            {
-                if (token.IsCancellationRequested) break;
-                if (!row.Item.Include || row.Item.Status != Q.Pending) continue;
-                if (row.Item.Kind == "short")
+                var batch = groups.Select(g => g.Dequeue()).ToList();
+                groups.RemoveAll(g => g.Count == 0);
+                var regular = new Queue<QRow>(batch.Where(r => r.Item.Kind != "short"));
+                var shorts = new Queue<QRow>(batch.Where(r => r.Item.Kind == "short"));
+                async Task Worker(Queue<QRow> queue)
                 {
-                    try { await lanes.WaitAsync(token); } catch (OperationCanceledException) { break; }
-                    shorts.Add(Lane(row));
-                    continue;
+                    while (!token.IsCancellationRequested && queue.TryDequeue(out var row))
+                    {
+                        await lanes.WaitAsync(token);
+                        try { if (await Go(row) is { } error && Passing(error)) again.Add((row, error)); }
+                        finally { lanes.Release(); }
+                    }
                 }
-                if (await Go(row, false) is { } err && Passing(err)) lock (again) again.Add((row, err));
-                Done();
+                await Task.WhenAll(Enumerable.Range(0, Math.Min(regular.Count, 3)).Select(_ => Worker(regular))
+                    .Concat(Enumerable.Range(0, Math.Min(shorts.Count, 6)).Select(_ => Worker(shorts))).ToArray());
             }
-            await Task.WhenAll(shorts);
-            // YouTube's 403 and "are you a bot" usually pass minutes later: one more go at the end — after a 403 with a
-            // fresh yt-dlp, after "not a bot" with your YouTube sign-in if there is one
-            if (again.Count > 0 && !token.IsCancellationRequested)
+            int[] waits = [30, 120, 300];
+            var updated = false;
+            for (var round = 0; round < waits.Length && again.Count > 0; round++)
             {
-                if (again.Any(x => x.Error.Contains("403"))) { status("Обновляю yt-dlp перед второй попыткой…"); await Task.Run(Tools.UpdateYtDlp); }
-                foreach (var (row, err) in again)
+                var last = round == waits.Length - 1;
+                if (!updated && again.Any(x => x.Error.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (token.IsCancellationRequested) break;
-                    Set(row, Q.Pending, "вторая попытка…");
-                    if (await Go(row, Bot(err) && Account.Enabled) != null)
-                        Ui.OnUi(() => row.Progress += " Вторая попытка тоже не удалась — нажмите «Повторить ошибки» позже.");
+                    updated = true;
+                    status("Проверяю обновление yt-dlp перед повтором…");
+                    try { await Task.Run(() => Tools.UpdateYtDlp(token), token); }
+                    catch (Exception) when (!token.IsCancellationRequested) { }
+                }
+                status($"Жду {Eta(waits[round])} перед повтором {again.Count} загрузок…");
+                await Task.Delay(TimeSpan.FromSeconds(waits[round]), token);
+                var batch = again.ToArray();
+                again.Clear();
+                foreach (var (row, previousError) in batch)
+                {
+                    token.ThrowIfCancellationRequested();
+                    Set(row, Q.Pending, $"Повтор {round + 1} из {waits.Length}…");
+                    var formatError = FormatUnavailable(previousError);
+                    var fallback = last && !formatError && Lib.Config.FallbackApi != null;
+                    var compatible = !fallback && (formatError || last && (Bot(previousError) || previousError.Contains("403")));
+                    if (await Go(row, fallback, compatible, final: last) is { } error && !last && Passing(error))
+                        again.Add((row, error));
                 }
             }
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+
         finally
         {
-            _cts.Dispose(); _cts = null; _proc = null;
+            _cts.Dispose(); _cts = null; _queueDirty = false;
             if (_cancelAll) { foreach (var row in Rows.Where(r => r.Item.Status != Q.Done).ToList()) Rows.Remove(row); }
             _cancelAll = false; Changed();
         }
     }
 
-    static void Set(QRow r, string status, string progress) => Ui.OnUi(() => { r.Item = r.Item with { Status = status }; r.Progress = progress; Changed(); });
+    static void Set(QRow r, string status, string progress) => Ui.OnUi(() => { r.Item = r.Item with { Status = status }; r.Progress = progress; _queueDirty = true; });
 
-    static async Task<string?> One(QRow row, Mount m, CancellationToken ct, bool account = false)
+    static async Task<string?> One(QRow row, Mount m, CancellationToken ct, bool fallback = false, bool compatible = false)
     {
         var it = row.Item;
-        var tmp = Directory.CreateDirectory(Path.Combine(Lib.TempDir, it.Id + (it.WithAds ? "-uncut" : ""))).FullName;
+        var tmp = Directory.CreateDirectory(Path.Combine(Lib.TempDir, it.Id +
+            (fallback ? "-fallback" : compatible ? "-compatible" : it.WithAds ? "-uncut" : ""))).FullName;
         var c = Lib.Config;
         var args = new List<string>
         {
-            "-f", it.Spec ?? "bv*+ba/b", "--no-playlist", "--newline", "--no-mtime", "--no-warnings",
+            "-f", compatible ? CompatibleFormat(it.Kind == "short", ProfileForDevices().MaxShortSide) : it.Spec ?? "bv*+ba/b",
+            "--no-playlist", "--newline", "--no-mtime", "--no-warnings",
             "-o", Path.Combine(tmp, "%(uploader).30B - %(title).170B.%(ext)s"),
             "--embed-metadata", "--embed-chapters",
             // YouTube rate-limits subtitles (HTTP 429); a missing subtitle must not cost the whole video
@@ -407,16 +486,15 @@ public static class Downloader
             "--print", "after_move:KTFILE %(filepath)s",
         };
         // a Short is a minute of video: subtitles (2 s of waiting each), comments and SponsorBlock cost it more time than the video itself
-        if (it.Kind != "short")
+        if (it.Kind != "short" && !compatible)
         {
             args.AddRange(["--write-subs", "--sub-langs", string.Join(",", c.SubLangs) + ",-live_chat", "--convert-subs", "vtt", "--sleep-subtitles", "2"]);
             if (!it.WithAds) args.AddRange(["--sponsorblock-mark", "all"]);
             if (c.AutoSubs) args.Add("--write-auto-subs");
-            args.AddRange(Lib.CommentArgs());
             if (!it.WithAds && c.SponsorRemove.Count > 0) args.AddRange(["--sponsorblock-remove", string.Join(",", c.SponsorRemove)]);
         }
-        if (!it.WithAds && c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
-        if (account) args.AddRange(Account.CookieArgs());
+        if (!compatible) args.AddRange(Lib.CommentArgs(it.Kind == "short"));
+        if (!compatible && !it.WithAds && c.PreciseCuts) args.Add("--force-keyframes-at-cuts");
         args.Add(it.Url);
 
         ct.ThrowIfCancellationRequested();
@@ -426,10 +504,17 @@ public static class Downloader
         var log = new List<string>();
         long streamsDone = 0, lastTotal = 0, lastDone = 0;
         var err = new List<string>();
+        if (fallback)
+        {
+            file = await FallbackDownload.Get(it, tmp, row, ct);
+            note = "Загружено с резервного сервера. Сегменты рекламы сохранены.";
+        }
+        else
+        {
+        await PaceExtractor(ct);
         var psi = Tools.Start(Tools.YtDlp, args);
         using (var p = Process.Start(psi)!)
         {
-            _proc = p;
             using var reg = ct.Register(() => { try { p.Kill(true); } catch (Exception) { } });
             var errTask = Task.Run(async () => { string? l; while ((l = await p.StandardError.ReadLineAsync()) != null) lock (err) { if (err.Count == 2000) err.RemoveAt(0); err.Add(l); } });
             string? line;
@@ -470,7 +555,10 @@ public static class Downloader
                 throw new IOException(raw);
             }
             if (file == null) throw new IOException("yt-dlp ничего не скачал. Подробности — в журнале: " + LogPath(it.Id));
-            if (errors.Count > 0) note = "часть субтитров не скачалась — YouTube ограничил запросы";
+            if (compatible) note = "Сохранено в совместимом MP4";
+            else if (errors.Count > 0) note = "часть субтитров не скачалась — YouTube ограничил запросы";
+        }
+
         }
 
         // check before it goes anywhere near the library
@@ -480,11 +568,13 @@ public static class Downloader
         var streams = pr.GetProperty("streams").EnumerateArray().Select(s => s.GetProperty("codec_type").GetString()).ToList();
         var dur = double.Parse(pr.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
         if (!streams.Contains("video") || !streams.Contains("audio")) throw new IOException("в файле нет видео или звука");
-        if (it.DurationSec > 0 && dur < (it.DurationSec - it.SbCutSec) * 0.9)
-            throw new IOException($"длительность {dur:0} с вместо ≈{it.DurationSec - it.SbCutSec:0} с — файл недокачан или повреждён");
-        if (it.Kind != "short" && it.SbCutSec > 10 && Lib.Config.SponsorRemove.Count > 0 && dur > it.DurationSec - it.SbCutSec / 2)
+        var expectedDuration = it.DurationSec - (fallback || compatible ? 0 : it.SbCutSec);
+        if (expectedDuration > 0 && dur < expectedDuration * 0.9)
+            throw new IOException($"длительность {dur:0} с вместо ≈{expectedDuration:0} с — файл недокачан или повреждён");
+        if (!fallback && !compatible && it.Kind != "short" && it.SbCutSec > 10 && Lib.Config.SponsorRemove.Count > 0 && dur > it.DurationSec - it.SbCutSec / 2)
             throw new SponsorCutException("SponsorBlock не вырезал сегменты");
 
+        var cover = await Lib.YouTubeCover(it.Id, it.Kind == "short", ct);
         await StorageWriter.WaitAsync(ct);
         try
         {
@@ -542,7 +632,7 @@ public static class Downloader
         var td = Directory.CreateDirectory(Path.Combine(m.Ml, "thumbs")).FullName;
         try
         {
-            if (await Lib.YouTubeCover(it.Id, it.Kind == "short", ct) is { } cover)
+            if (cover != null)
             {
                 await File.WriteAllBytesAsync(Path.Combine(td, it.Id + ".jpg"), cover, ct);
                 thumb = "thumbs/" + it.Id + ".jpg";
@@ -565,9 +655,11 @@ public static class Downloader
             DurationMs = (long)(dur * 1000), Width = vs.GetProperty("width").GetInt32(), Height = vs.GetProperty("height").GetInt32(),
             Vcodec = vs.GetProperty("codec_name").GetString(), Acodec = aus.GetProperty("codec_name").GetString(),
             Size = new FileInfo(file).Length, Path = destRel, Subs = subs.Count > 0 ? subs : null, Thumb = thumb,
-            AddedAt = Format.Now(), Source = "manager", SponsorCutMs = (long)(Math.Max(0, it.DurationSec - dur) * 1000),
+            AddedAt = Format.Now(), Source = "manager", SponsorCutMs = fallback || compatible ? 0 : (long)(Math.Max(0, it.DurationSec - dur) * 1000),
+            ChannelId = it.ChannelId, ViewCount = it.ViewCount, LikeCount = it.LikeCount,
             Comments = comments?.Path, CommentCount = comments?.Count, Tags = it.Tags is { Count: > 0 } ? it.Tags : null,
         });
+        Lib.RestorePlaylistEntries(m, key, it.Id, it.Playlists);
         foreach (var old in Lib.RedownloadRequests().Where(v => v.Meta.YtId == it.Id).ToList())
             Lib.SetFlags(old.Mount, old.Key, f => f with { Redownload = false });
         await Task.Run(() => Lib.Flush(m));
@@ -592,17 +684,27 @@ public static class Downloader
     static bool Bot(string err) => err.Contains("not a bot", StringComparison.OrdinalIgnoreCase) || err.Contains("sign in to confirm", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Refusals that tend to pass: worth one more go at the end of the queue.</summary>
-    static bool Passing(string err) => Bot(err) || new[] { "403", "429", "timed out", "connection", "unable to download webpage" }.Any(x => err.Contains(x, StringComparison.OrdinalIgnoreCase));
+    public static bool FormatUnavailable(string err) => err.Contains("requested format is not available", StringComparison.OrdinalIgnoreCase);
+
+    public static string CompatibleFormat(bool shorts, int limit)
+    {
+        var dimension = shorts ? "width" : "height";
+        var video = $"[ext=mp4][vcodec^=avc1][{dimension}<={limit}][fps<=30]";
+        return $"b{video}[acodec^=mp4a]/bv{video}+ba[ext=m4a]";
+    }
+
+    public static bool Passing(string err) => Bot(err) || FormatUnavailable(err) || new[] { "HTTP Error 403", "HTTP Error 429", "timed out", "connection", "unable to download webpage",
+        "content isn't available, try again later", "network is unreachable", "getaddrinfo" }.Any(x => err.Contains(x, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>yt-dlp's English errors in words a person can act on.</summary>
     public static string Human(string raw)
     {
         var s = raw.ToLowerInvariant();
-        if (Bot(s)) return "YouTube попросил подтвердить, что вы не робот (так бывает с адресами VPN) — повторю в конце очереди.";
+        if (Bot(s)) return "YouTube продолжает требовать подтверждение после автоматических попыток." ;
         if (s.Contains("video unavailable") || s.Contains("private video") || s.Contains("been removed") || s.Contains("terminated"))
             return "Видео недоступно: удалено, скрыто или закрыто автором.";
         if (s.Contains("age") && (s.Contains("restrict") || s.Contains("confirm your age"))) return "Видео 18+: YouTube не отдаёт его без входа в аккаунт.";
-        if (s.Contains("http error 403")) return "YouTube не отдал файл (403) — повторю в конце очереди со свежим yt-dlp.";
+        if (s.Contains("http error 403")) return "YouTube не отдал файл (403).";
         if (s.Contains("http error 429")) return "YouTube временно ограничил загрузки (429). Попробуйте позже.";
         if (s.Contains("requested format is not available")) return "Такого формата у видео нет — выберите другой в списке.";
         if (s.Contains("unable to download webpage") || s.Contains("timed out") || s.Contains("getaddrinfo") || s.Contains("connection") || s.Contains("network"))
@@ -643,9 +745,54 @@ public static class Downloader
         var have = Rows.Select(r => r.Item.Id).ToHashSet();
         foreach (var link in links.Where(l => l.Trim().Length > 0))
         {
-            List<(string Id, string Url, string? Title, string Kind)> found;
-            try { status("Смотрю ссылку: " + link); found = await Task.Run(() => Expand(link, limit)); }
-            catch (Exception e) { status($"Не удалось открыть {link}: {e.Message}"); continue; }
+            var playlistId = source == null ? YoutubePlaylistId(link) : null;
+            List<(string Id, string Url, string? Title, string Kind, double Seconds)> found;
+            string? playlistTitle;
+            try
+            {
+                status("Смотрю ссылку…");
+                (found, playlistTitle) = await Task.Run(() => Expand(link, playlistId != null ? 1000 : limit));
+            }
+            catch (Exception e) { status($"Не удалось открыть ссылку: {Human(e.Message)}"); return; }
+            if (playlistId != null && Lib.Mounts.FirstOrDefault(m => m.Ref.StorageId == storageId) is { } mount)
+            {
+                var name = string.IsNullOrWhiteSpace(playlistTitle) ? "Плейлист YouTube" : playlistTitle.Trim();
+                name = name[..Math.Min(name.Length, 120)];
+                var present = Lib.Videos().Where(v => v.Mount == mount && v.Present && v.Meta.YtId != null)
+                    .GroupBy(v => v.Meta.YtId!).ToDictionary(g => g.Key, g => g.First());
+                var queued = Rows.Where(r => r.Item.StorageId == storageId && r.Item.Status != Q.Done)
+                    .GroupBy(r => r.Item.Id).ToDictionary(g => g.Key, g => g.First());
+                long order = 0;
+                foreach (var entry in found)
+                {
+                    order++;
+                    if (present.TryGetValue(entry.Id, out var existing))
+                    {
+                        Lib.SetPlaylist(mount, existing.Key, playlistId, new PlaylistEntry(Format.Now(), name, order));
+                        continue;
+                    }
+                    if (!queued.TryGetValue(entry.Id, out var row))
+                    {
+                        row = new QRow(new QueueItem
+                        {
+                            Id = entry.Id, Url = entry.Url, Title = entry.Title ?? entry.Id, Kind = entry.Kind,
+                            StorageId = storageId, Source = "плейлист: " + name, DurationSec = entry.Seconds,
+                            Bytes = new Pick(entry.Id, entry.Url, entry.Title ?? entry.Id, null,
+                                entry.Seconds > 0 ? entry.Seconds : null, null, entry.Kind, 0, "", "").Estimate,
+                            Approx = true
+                        });
+                        Rows.Add(row);
+                        queued[entry.Id] = row;
+                    }
+                    var marks = row.Item.Playlists == null ? new() : new Dictionary<string, PlaylistEntry>(row.Item.Playlists);
+                    marks[playlistId] = new PlaylistEntry(Format.Now(), name, order);
+                    row.Item = row.Item with { Playlists = marks, Include = true, Status = Q.Pending };
+                    have.Add(entry.Id);
+                }
+                Lib.Flush(mount);
+                Changed();
+                continue;
+            }
             var n = 0;
             foreach (var f in found.Where(f => !have.Contains(f.Id)))
             {
@@ -658,9 +805,30 @@ public static class Downloader
                     have.Add(q.Id);
                     Changed();
                 }
-                catch (Exception e) { status($"Пропущено {f.Id}: {e.Message}"); }
+                catch (Exception e) when (Passing(e.Message))
+                {
+                    var skipped = skip.Contains(f.Id);
+                    Rows.Add(new QRow(new QueueItem
+                    {
+                        Id = f.Id, Url = f.Url, Title = f.Title ?? f.Id, Kind = f.Kind, StorageId = storageId,
+                        Source = source ?? "по ссылке", Reason = reason, Include = !skipped,
+                        Status = skipped ? Q.Skipped : Q.Pending
+                    }) { Progress = skipped ? "" : "YouTube временно не ответил. Формат проверится при запуске загрузок." });
+                    have.Add(f.Id);
+                    Changed();
+                }
+                catch (Exception e) { status($"Пропущено {f.Id}: {Human(e.Message)}"); }
             }
         }
         status("Очередь готова — проверьте и нажмите «Подтвердить загрузку»");
+    }
+
+    public static string? YoutubePlaylistId(string link)
+    {
+        if (!Uri.TryCreate(link.Trim(), UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("https" or "http") || uri.Host is not ("youtube.com" or "www.youtube.com" or "music.youtube.com") ||
+            uri.AbsolutePath != "/playlist") return null;
+        var match = Regex.Match(uri.Query, @"(?:[?&])list=([A-Za-z0-9_-]{1,120})(?:&|$)");
+        return match.Success ? "yt-" + match.Groups[1].Value : null;
     }
 }
